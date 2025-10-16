@@ -162,13 +162,15 @@ def create_main_window() -> tk.Tk:
     notebook.grid(row=1, column=0, padx=16, pady=(16, 8), sticky="nsew")
 
     team_videos_frame = ttk.Frame(notebook)
+    config_frame = ttk.Frame(notebook)
     tools_frame = ttk.Frame(notebook)
 
-    for frame in (team_videos_frame, tools_frame):
+    for frame in (team_videos_frame, config_frame, tools_frame):
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
 
     notebook.add(team_videos_frame, text="Team Videos")
+    notebook.add(config_frame, text="Config")
     notebook.add(tools_frame, text="Tools")
 
     placeholder_videos_label = ttk.Label(
@@ -181,13 +183,16 @@ def create_main_window() -> tk.Tk:
     console = ApplicationConsole(root)
     root.rowconfigure(2, weight=0)
     console.render(row=2)
-    build_tools_tab(tools_frame, console)
+    credentials_manager, ros_document_loader = build_config_tab(config_frame, console)
+    build_tools_tab(tools_frame, console, credentials_manager, ros_document_loader)
 
     return root
 
 
-def build_tools_tab(parent: ttk.Frame, console: ApplicationConsole) -> None:
-    """Populate the Tools tab with utility sections."""
+def build_config_tab(
+    parent: ttk.Frame, console: ApplicationConsole
+) -> Tuple["GoogleDriveCredentialsManager", "ROSDocumentLoaderUI"]:
+    """Populate the Config tab with shared application settings."""
 
     parent.columnconfigure(0, weight=1)
 
@@ -207,7 +212,7 @@ def build_tools_tab(parent: ttk.Frame, console: ApplicationConsole) -> None:
     separator_one = ttk.Separator(parent, orient="horizontal")
     separator_one.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
 
-    ros_document_frame = ttk.Frame(parent, padding=(12, 6, 12, 6))
+    ros_document_frame = ttk.Frame(parent, padding=(12, 6, 12, 12))
     ros_document_frame.grid(row=2, column=0, sticky="nsew")
     ros_document_frame.columnconfigure(1, weight=1)
 
@@ -220,11 +225,21 @@ def build_tools_tab(parent: ttk.Frame, console: ApplicationConsole) -> None:
     ros_document_loader = ROSDocumentLoaderUI(ros_document_frame, console)
     ros_document_loader.render(row=1)
 
-    separator_two = ttk.Separator(parent, orient="horizontal")
-    separator_two.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
+    return credentials_manager, ros_document_loader
 
-    ros_frame = ttk.Frame(parent, padding=(12, 6, 12, 12))
-    ros_frame.grid(row=4, column=0, sticky="nsew")
+
+def build_tools_tab(
+    parent: ttk.Frame,
+    console: ApplicationConsole,
+    credentials_manager: "GoogleDriveCredentialsManager",
+    ros_document_loader: "ROSDocumentLoaderUI",
+) -> None:
+    """Populate the Tools tab with utilities that operate on ROS documents."""
+
+    parent.columnconfigure(0, weight=1)
+
+    ros_frame = ttk.Frame(parent, padding=(12, 12, 12, 6))
+    ros_frame.grid(row=0, column=0, sticky="nsew")
     ros_frame.columnconfigure(1, weight=1)
 
     ttk.Label(
@@ -236,6 +251,23 @@ def build_tools_tab(parent: ttk.Frame, console: ApplicationConsole) -> None:
     ROSPlaceholderGeneratorUI(ros_frame, credentials_manager, ros_document_loader, console).render(
         row=1
     )
+
+    separator = ttk.Separator(parent, orient="horizontal")
+    separator.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+
+    match_frame = ttk.Frame(parent, padding=(12, 6, 12, 12))
+    match_frame.grid(row=2, column=0, sticky="nsew")
+    match_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(
+        match_frame,
+        text="Match Number Generator",
+        font=("Helvetica", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+    MatchNumberGeneratorUI(
+        match_frame, credentials_manager, ros_document_loader, console
+    ).render(row=1)
 
 
 class GoogleDriveCredentialsManager:
@@ -527,12 +559,19 @@ class ROSDocumentLoaderUI:
 
     STORAGE_PATH = Path.home() / ".fgc_team_filler" / "ros_document_url.txt"
 
-    def __init__(self, parent: ttk.Frame, console: ApplicationConsole) -> None:
+    def __init__(
+        self, parent: ttk.Frame, console: ApplicationConsole
+    ) -> None:
         self.parent = parent
         self.console = console
         self.sheet_url_var = tk.StringVar(value=self._load_saved_url())
+        self.document_name_var = tk.StringVar()
         self._status_var = tk.StringVar()
         self._listeners: List[Callable[[str], None]] = []
+        self._name_listeners: List[Callable[[str], None]] = []
+
+        self.sheet_url_var.trace_add("write", self._on_url_var_changed)
+        self._update_document_name(self.sheet_url_var.get())
 
     def render(self, row: int) -> None:
         ttk.Label(self.parent, text="Google Sheets URL:").grid(
@@ -542,12 +581,23 @@ class ROSDocumentLoaderUI:
         entry = ttk.Entry(self.parent, textvariable=self.sheet_url_var)
         entry.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
+        ttk.Label(self.parent, text="File name:").grid(
+            row=row + 1, column=0, sticky="w", pady=(4, 0)
+        )
+
+        name_display = ttk.Entry(
+            self.parent,
+            textvariable=self.document_name_var,
+            state="readonly",
+        )
+        name_display.grid(row=row + 1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+
         save_button = ttk.Button(
             self.parent,
             text="Save Document URL",
             command=self.save_document_url,
         )
-        save_button.grid(row=row + 1, column=1, sticky="e", pady=8)
+        save_button.grid(row=row + 2, column=1, sticky="e", pady=8)
 
         status_label = ttk.Label(
             self.parent,
@@ -555,7 +605,7 @@ class ROSDocumentLoaderUI:
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 2, column=0, columnspan=2, sticky="w")
+        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w")
 
         initial_url = self.sheet_url_var.get().strip()
         if initial_url:
@@ -566,8 +616,14 @@ class ROSDocumentLoaderUI:
     def add_listener(self, callback: Callable[[str], None]) -> None:
         self._listeners.append(callback)
 
+    def add_name_listener(self, callback: Callable[[str], None]) -> None:
+        self._name_listeners.append(callback)
+
     def get_document_url(self) -> str:
         return self.sheet_url_var.get().strip()
+
+    def get_document_name(self) -> str:
+        return self.document_name_var.get().strip()
 
     def save_document_url(self) -> None:
         url = self.sheet_url_var.get().strip()
@@ -589,6 +645,7 @@ class ROSDocumentLoaderUI:
             return
 
         self._set_status("ROS document URL saved.")
+        self._update_document_name(url)
         for listener in list(self._listeners):
             try:
                 listener(url)
@@ -608,6 +665,27 @@ class ROSDocumentLoaderUI:
         self._status_var.set(message)
         if log:
             self.console.log(f"[ROS Document] {message}")
+
+    def _on_url_var_changed(self, *_: Any) -> None:
+        self._update_document_name(self.sheet_url_var.get())
+
+    def _update_document_name(self, url: str) -> None:
+        if not url:
+            display = "Not set"
+        else:
+            name = derive_document_name(url)
+            if not name:
+                spreadsheet_id = extract_spreadsheet_id(url)
+                if spreadsheet_id:
+                    name = f"Spreadsheet {spreadsheet_id}"
+            display = name or "Unknown"
+
+        self.document_name_var.set(display)
+        for listener in list(self._name_listeners):
+            try:
+                listener(display)
+            except Exception:
+                continue
 
 
 class ROSPlaceholderGeneratorUI:
@@ -635,7 +713,9 @@ class ROSPlaceholderGeneratorUI:
         self._default_status = "Load a ROS document and Google credentials to begin."
 
         self.document_loader.add_listener(self._on_document_url_changed)
+        self.document_loader.add_name_listener(self._on_document_name_changed)
         self._on_document_url_changed(self.document_loader.get_document_url())
+        self._on_document_name_changed(self.document_loader.get_document_name())
 
     def render(self, row: int) -> None:
         ttk.Label(self.parent, text="Current ROS Document:").grid(
@@ -667,10 +747,12 @@ class ROSPlaceholderGeneratorUI:
         self.set_status(self._default_status, log=False)
 
     def _on_document_url_changed(self, url: str) -> None:
-        display_value = url if url else "Not set"
-        self.current_document_var.set(display_value)
         if not url:
             self.set_status("Save a ROS document URL before generating placeholders.", log=False)
+
+    def _on_document_name_changed(self, name: str) -> None:
+        display_value = name if name else "Not set"
+        self.current_document_var.set(display_value)
 
     def generate_placeholders(self) -> None:
         document_url = self.document_loader.get_document_url()
@@ -720,6 +802,118 @@ class ROSPlaceholderGeneratorUI:
             self.console.log(f"[ROS Placeholder Generator] {message}")
 
 
+class MatchNumberGeneratorUI:
+    """User interface for numbering RANKING MATCH entries in ROS documents."""
+
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        credentials_manager: GoogleDriveCredentialsManager,
+        document_loader: ROSDocumentLoaderUI,
+        console: ApplicationConsole,
+    ) -> None:
+        self.parent = parent
+        self.credentials_manager = credentials_manager
+        self.document_loader = document_loader
+        self.console = console
+        self.current_document_var = tk.StringVar()
+        self._status_var = tk.StringVar()
+        self._default_status = "Load a ROS document and Google credentials to begin."
+
+        self.document_loader.add_listener(self._on_document_url_changed)
+        self.document_loader.add_name_listener(self._on_document_name_changed)
+        self._on_document_url_changed(self.document_loader.get_document_url())
+        self._on_document_name_changed(self.document_loader.get_document_name())
+
+    def render(self, row: int) -> None:
+        ttk.Label(self.parent, text="Current ROS Document:").grid(
+            row=row, column=0, sticky="w", pady=(8, 0)
+        )
+
+        document_display = ttk.Entry(
+            self.parent,
+            textvariable=self.current_document_var,
+            state="readonly",
+        )
+        document_display.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        generate_button = ttk.Button(
+            self.parent,
+            text="Generate Match Numbers",
+            command=self.generate_match_numbers,
+        )
+        generate_button.grid(row=row + 1, column=1, sticky="e", pady=8)
+
+        status_label = ttk.Label(
+            self.parent,
+            textvariable=self._status_var,
+            wraplength=520,
+            justify="left",
+        )
+        status_label.grid(row=row + 2, column=0, columnspan=2, sticky="w")
+
+        self.set_status(self._default_status, log=False)
+
+    def _on_document_url_changed(self, url: str) -> None:
+        if not url:
+            self.set_status("Save a ROS document URL before generating match numbers.", log=False)
+
+    def _on_document_name_changed(self, name: str) -> None:
+        display_value = name if name else "Not set"
+        self.current_document_var.set(display_value)
+
+    def generate_match_numbers(self) -> None:
+        document_url = self.document_loader.get_document_url()
+        if not document_url:
+            self.set_status("Save a ROS document URL before generating match numbers.")
+            return
+
+        credentials, error = self.credentials_manager.get_valid_credentials()
+        if credentials is None:
+            if error:
+                self.set_status(error)
+            else:
+                self.set_status("Load Google Drive credentials before running this tool.")
+            return
+
+        if build is None:
+            self.set_status(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+            return
+
+        spreadsheet_id = extract_spreadsheet_id(document_url)
+        if not spreadsheet_id:
+            self.set_status("Unable to determine spreadsheet ID from the saved document URL.")
+            return
+
+        self.set_status("Contacting Google Sheets API...")
+
+        def _worker() -> None:
+            try:
+                report, diagnostics = generate_ranking_match_numbers(
+                    credentials, spreadsheet_id
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to update spreadsheet: {exc}"
+                self.parent.after(0, lambda: self.set_status(message))
+                return
+
+            success_message = format_report(
+                report,
+                diagnostics,
+                success_header="Ranking match numbers applied:",
+                empty_message="No RANKING MATCH cells were updated.",
+            )
+            self.parent.after(0, lambda: self.set_status(success_message))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def set_status(self, message: str, *, log: bool = True) -> None:
+        self._status_var.set(message)
+        if log:
+            self.console.log(f"[Match Number Generator] {message}")
+
 def extract_spreadsheet_id(url: str) -> str:
     """Extract the spreadsheet ID from a Google Sheets URL."""
 
@@ -747,15 +941,46 @@ def extract_spreadsheet_id(url: str) -> str:
     return ""
 
 
-def generate_placeholders_for_sheet(
-    credentials: Credentials, spreadsheet_id: str
-) -> Tuple[Dict[str, List[str]], List[str]]:
-    """Scan the spreadsheet and replace placeholder cells.
+def derive_document_name(url: str) -> str:
+    """Best-effort extraction of a human-friendly name from a Sheets URL."""
 
-    Returns the applied updates together with diagnostics describing how the
-    spreadsheet was inspected (for example, which column contained the ``TASK``
-    header and sample colors that were evaluated).
-    """
+    if not url:
+        return ""
+
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    for part in reversed(path_parts):
+        lowered = part.lower()
+        if lowered in {"edit", "view", "copy"}:
+            continue
+        if lowered == "d":
+            continue
+        if lowered in {"spreadsheets", "file"}:
+            continue
+        return urllib.parse.unquote(part)
+
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("name", "title", "resourcekey"):
+        values = query.get(key)
+        if values:
+            return urllib.parse.unquote(values[0])
+
+    fragment_query = urllib.parse.parse_qs(parsed.fragment)
+    for key in ("name", "title"):
+        values = fragment_query.get(key)
+        if values:
+            return urllib.parse.unquote(values[0])
+
+    return ""
+
+
+def _fetch_spreadsheet(
+    credentials: Credentials, spreadsheet_id: str
+) -> Tuple[Dict[str, Any], bool, Any]:
+    """Retrieve spreadsheet metadata and return it with theme support info."""
 
     service = build("sheets", "v4", credentials=credentials)
     spreadsheets_resource = service.spreadsheets()
@@ -770,7 +995,7 @@ def generate_placeholders_for_sheet(
         "))))"
     )
     fields_with_theme = base_fields + ",spreadsheetTheme"
-    get_kwargs = {
+    get_kwargs: Dict[str, Any] = {
         "spreadsheetId": spreadsheet_id,
         "includeGridData": True,
         "fields": fields_with_theme,
@@ -801,6 +1026,23 @@ def generate_placeholders_for_sheet(
                 raise
         else:
             raise
+
+    return spreadsheet, theme_supported, service
+
+
+def generate_placeholders_for_sheet(
+    credentials: Credentials, spreadsheet_id: str
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Scan the spreadsheet and replace placeholder cells.
+
+    Returns the applied updates together with diagnostics describing how the
+    spreadsheet was inspected (for example, which column contained the ``TASK``
+    header and sample colors that were evaluated).
+    """
+
+    spreadsheet, theme_supported, service = _fetch_spreadsheet(
+        credentials, spreadsheet_id
+    )
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
     diagnostics: List[str] = [
@@ -882,6 +1124,128 @@ def generate_placeholders_for_sheet(
         },
         diagnostics,
     )
+
+
+def generate_ranking_match_numbers(
+    credentials: Credentials, spreadsheet_id: str
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Number every RANKING MATCH cell found in the spreadsheet."""
+
+    spreadsheet, _theme_supported, service = _fetch_spreadsheet(
+        credentials, spreadsheet_id
+    )
+
+    updates: Dict[str, List[Tuple[str, str]]] = {}
+    diagnostics: List[str] = []
+    data_updates: List[Dict[str, Any]] = []
+
+    for sheet in spreadsheet.get("sheets", []):
+        if not isinstance(sheet, dict):
+            continue
+
+        properties = sheet.get("properties", {})
+        title = properties.get("title", "Untitled")
+        sheet_data = sheet.get("data", [])
+        if not sheet_data:
+            diagnostics.append(f"{title}: No data available to inspect.")
+            continue
+
+        matches: List[Tuple[int, int, str]] = []
+        for grid_data in sheet_data:
+            if not isinstance(grid_data, dict):
+                continue
+            start_row = grid_data.get("startRow", 0)
+            start_column = grid_data.get("startColumn", 0)
+            for row_offset, row in enumerate(grid_data.get("rowData", [])):
+                if not isinstance(row, dict):
+                    continue
+                row_index = start_row + row_offset
+                values = row.get("values", [])
+                for column_offset, cell in enumerate(values):
+                    if not isinstance(cell, dict):
+                        continue
+                    column_index = start_column + column_offset
+                    cell_text = _extract_cell_text(cell)
+                    if not cell_text:
+                        continue
+                    normalized = cell_text.strip()
+                    upper_normalized = normalized.upper()
+                    if upper_normalized == "RANKING MATCH" or upper_normalized.startswith(
+                        "RANKING MATCH #"
+                    ):
+                        matches.append((row_index, column_index, normalized))
+
+        if not matches:
+            diagnostics.append(f"{title}: No RANKING MATCH cells found.")
+            continue
+
+        sheet_updates: List[Tuple[str, str]] = []
+        for counter, (row_index, column_index, original_text) in enumerate(
+            sorted(matches, key=lambda entry: (entry[0], entry[1])), start=1
+        ):
+            cell_a1 = column_index_to_letter(column_index) + str(row_index + 1)
+            new_text = f"RANKING MATCH #{counter}"
+            if original_text == new_text:
+                continue
+            sheet_updates.append((cell_a1, new_text))
+            data_updates.append(
+                {
+                    "range": single_cell_range(title, cell_a1),
+                    "values": [[new_text]],
+                }
+            )
+
+        diagnostics.append(
+            f"{title}: Numbered {len(matches)} RANKING MATCH cell(s); "
+            f"updated {len(sheet_updates)} of them."
+        )
+
+        if sheet_updates:
+            updates[title] = sheet_updates
+
+    if data_updates:
+        values_resource = service.spreadsheets().values()
+        batch_update_kwargs = {
+            "spreadsheetId": spreadsheet_id,
+            "body": {
+                "valueInputOption": "USER_ENTERED",
+                "data": data_updates,
+            },
+        }
+        if _method_supports_parameter(values_resource.batchUpdate, "supportsAllDrives"):
+            batch_update_kwargs["supportsAllDrives"] = True
+
+        values_resource.batchUpdate(**batch_update_kwargs).execute()
+
+    return (
+        {
+            sheet: [f"{cell}: {text}" for cell, text in entries]
+            for sheet, entries in updates.items()
+        },
+        diagnostics,
+    )
+
+
+def _extract_cell_text(cell: Dict[str, Any]) -> str:
+    """Return the string contents of a cell, if available."""
+
+    formatted = cell.get("formattedValue")
+    if isinstance(formatted, str) and formatted.strip():
+        return formatted.strip()
+
+    user_entered = cell.get("userEnteredValue")
+    if isinstance(user_entered, dict):
+        string_value = user_entered.get("stringValue")
+        if isinstance(string_value, str) and string_value.strip():
+            return string_value.strip()
+
+    effective = cell.get("effectiveValue")
+    if isinstance(effective, dict):
+        string_value = effective.get("stringValue")
+        if isinstance(string_value, str) and string_value.strip():
+            return string_value.strip()
+
+    return ""
 
 
 def _build_theme_color_map(
@@ -1092,19 +1456,23 @@ def single_cell_range(sheet_title: str, cell_a1: str) -> str:
 
 
 def format_report(
-    report: Dict[str, List[str]], diagnostics: Sequence[str] = ()
+    report: Dict[str, List[str]],
+    diagnostics: Sequence[str] = (),
+    *,
+    success_header: str = "Placeholder updates applied:",
+    empty_message: str = "No matching placeholders were found.",
 ) -> str:
     """Create a human-readable report of the updates performed."""
 
     lines: List[str] = []
     if report:
-        lines.append("Placeholder updates applied:")
+        lines.append(success_header)
         for sheet, entries in report.items():
             lines.append(f"• {sheet}:")
             for entry in entries:
                 lines.append(f"  - {entry}")
     else:
-        lines.append("No matching placeholders were found.")
+        lines.append(empty_message)
 
     if diagnostics:
         if lines:
