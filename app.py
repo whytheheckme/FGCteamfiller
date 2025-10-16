@@ -593,11 +593,7 @@ def generate_placeholders_for_sheet(
         if not sheet_data:
             continue
 
-        row_data = sheet_data[0].get("rowData", [])
-        if not row_data:
-            continue
-
-        task_column = find_task_column(row_data)
+        task_column = find_task_column(sheet_data)
         if task_column is None:
             diagnostics.append(f"{title}: No TASK column found within the first 10 rows.")
             continue
@@ -608,7 +604,7 @@ def generate_placeholders_for_sheet(
         )
 
         matching_cells = find_placeholder_cells(
-            row_data, task_column, diagnostics, title
+            sheet_data, task_column, diagnostics, title
         )
         if not matching_cells:
             diagnostics.append(
@@ -653,19 +649,28 @@ def generate_placeholders_for_sheet(
     )
 
 
-def find_task_column(row_data: Sequence[dict]) -> Optional[int]:
+def find_task_column(sheet_data: Sequence[dict]) -> Optional[int]:
     """Locate the zero-based column index containing the TASK header."""
 
-    for row in row_data[:10]:
-        for idx, cell in enumerate(row.get("values", [])):
-            value = cell.get("formattedValue") or cell.get("userEnteredValue", {}).get("stringValue")
-            if isinstance(value, str) and value.strip().upper() == "TASK":
-                return idx
+    for global_row_index in range(10):
+        for grid_data in sheet_data:
+            start_row = grid_data.get("startRow", 0)
+            start_column = grid_data.get("startColumn", 0)
+            relative_row_index = global_row_index - start_row
+            row_data = grid_data.get("rowData", [])
+            if relative_row_index < 0 or relative_row_index >= len(row_data):
+                continue
+
+            row = row_data[relative_row_index]
+            for offset, cell in enumerate(row.get("values", [])):
+                value = cell.get("formattedValue") or cell.get("userEnteredValue", {}).get("stringValue")
+                if isinstance(value, str) and value.strip().upper() == "TASK":
+                    return start_column + offset
     return None
 
 
 def find_placeholder_cells(
-    row_data: Sequence[dict],
+    sheet_data: Sequence[dict],
     column_index: int,
     diagnostics: Optional[List[str]] = None,
     sheet_title: str = "",
@@ -673,11 +678,9 @@ def find_placeholder_cells(
     """Return the row indices containing the target placeholder color."""
 
     matches: List[int] = []
+    seen_rows: set[int] = set()
     sample_count = 0
-    for row_index, row in enumerate(row_data):
-        if column_index >= len(row.get("values", [])):
-            continue
-        cell = row["values"][column_index]
+    for row_index, cell in _iter_column_cells(sheet_data, column_index):
         effective_format = cell.get("effectiveFormat", {})
         color = (
             effective_format.get("backgroundColor")
@@ -695,8 +698,30 @@ def find_placeholder_cells(
             sample_count += 1
 
         if is_light_cornflower_blue(color):
-            matches.append(row_index)
+            if row_index not in seen_rows:
+                matches.append(row_index)
+                seen_rows.add(row_index)
     return matches
+
+
+def _iter_column_cells(
+    sheet_data: Sequence[dict], column_index: int
+) -> Iterable[Tuple[int, dict]]:
+    """Yield ``(row_index, cell)`` pairs for the specified column."""
+
+    for grid_data in sheet_data:
+        start_row = grid_data.get("startRow", 0)
+        start_column = grid_data.get("startColumn", 0)
+        cell_index = column_index - start_column
+        if cell_index < 0:
+            continue
+
+        for offset, row in enumerate(grid_data.get("rowData", [])):
+            row_index = start_row + offset
+            values = row.get("values", [])
+            if cell_index >= len(values):
+                continue
+            yield row_index, values[cell_index]
 
 
 def is_light_cornflower_blue(color: Dict[str, float]) -> bool:
