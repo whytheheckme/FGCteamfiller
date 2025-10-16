@@ -483,13 +483,15 @@ class ROSPlaceholderGeneratorUI:
 
         def _worker() -> None:
             try:
-                report = generate_placeholders_for_sheet(credentials, spreadsheet_id)
+                report, diagnostics = generate_placeholders_for_sheet(
+                    credentials, spreadsheet_id
+                )
             except Exception as exc:  # pragma: no cover - network interaction
                 message = f"Failed to update spreadsheet: {exc}"[:500]
                 self.parent.after(0, lambda: self.set_status(message))
                 return
 
-            success_message = format_report(report)
+            success_message = format_report(report, diagnostics)
             self.parent.after(0, lambda: self.set_status(success_message))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -531,10 +533,14 @@ def extract_spreadsheet_id(url: str) -> str:
     return ""
 
 
-def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: str) -> Dict[str, List[str]]:
+def generate_placeholders_for_sheet(
+    credentials: Credentials, spreadsheet_id: str
+) -> Tuple[Dict[str, List[str]], List[str]]:
     """Scan the spreadsheet and replace placeholder cells.
 
-    Returns a dictionary keyed by sheet title with a list of the cell updates applied.
+    Returns the applied updates together with diagnostics describing how the
+    spreadsheet was inspected (for example, which column contained the ``TASK``
+    header and sample colors that were evaluated).
     """
 
     service = build("sheets", "v4", credentials=credentials)
@@ -568,6 +574,13 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
         raise
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
+    diagnostics: List[str] = [
+        (
+            "Placeholder detection uses Light Cornflower Blue 3 with RGB "
+            f"{ROSPlaceholderGeneratorUI.COLOR_TARGET!r} ± "
+            f"{ROSPlaceholderGeneratorUI.COLOR_TOLERANCE:.3f}."
+        )
+    ]
     data_updates: List[Dict[str, Sequence[Sequence[str]]]] = []
 
     for sheet in spreadsheet.get("sheets", []):
@@ -586,10 +599,21 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
 
         task_column = find_task_column(row_data)
         if task_column is None:
+            diagnostics.append(f"{title}: No TASK column found within the first 10 rows.")
             continue
 
-        matching_cells = find_placeholder_cells(row_data, task_column)
+        column_letter = column_index_to_letter(task_column)
+        diagnostics.append(
+            f"{title}: TASK column located at index {task_column} (column {column_letter})."
+        )
+
+        matching_cells = find_placeholder_cells(
+            row_data, task_column, diagnostics, title
+        )
         if not matching_cells:
+            diagnostics.append(
+                f"{title}: No cells matched the placeholder color in column {column_letter}."
+            )
             continue
 
         updates[title] = []
@@ -620,10 +644,13 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
 
         values_resource.batchUpdate(**batch_update_kwargs).execute()
 
-    return {
-        sheet: [f"{cell}: {text}" for cell, text in entries]
-        for sheet, entries in updates.items()
-    }
+    return (
+        {
+            sheet: [f"{cell}: {text}" for cell, text in entries]
+            for sheet, entries in updates.items()
+        },
+        diagnostics,
+    )
 
 
 def find_task_column(row_data: Sequence[dict]) -> Optional[int]:
@@ -637,15 +664,36 @@ def find_task_column(row_data: Sequence[dict]) -> Optional[int]:
     return None
 
 
-def find_placeholder_cells(row_data: Sequence[dict], column_index: int) -> List[int]:
+def find_placeholder_cells(
+    row_data: Sequence[dict],
+    column_index: int,
+    diagnostics: Optional[List[str]] = None,
+    sheet_title: str = "",
+) -> List[int]:
     """Return the row indices containing the target placeholder color."""
 
     matches: List[int] = []
+    sample_count = 0
     for row_index, row in enumerate(row_data):
         if column_index >= len(row.get("values", [])):
             continue
         cell = row["values"][column_index]
-        color = cell.get("effectiveFormat", {}).get("backgroundColor") or {}
+        effective_format = cell.get("effectiveFormat", {})
+        color = (
+            effective_format.get("backgroundColor")
+            or effective_format.get("backgroundColorStyle", {}).get("rgbColor", {})
+            or {}
+        )
+
+        if diagnostics is not None and sample_count < 5:
+            red = color.get("red", 1.0)
+            green = color.get("green", 1.0)
+            blue = color.get("blue", 1.0)
+            diagnostics.append(
+                f"{sheet_title}: Row {row_index + 1} color rgb=({red:.3f}, {green:.3f}, {blue:.3f})."
+            )
+            sample_count += 1
+
         if is_light_cornflower_blue(color):
             matches.append(row_index)
     return matches
@@ -689,17 +737,28 @@ def column_index_to_letter(index: int) -> str:
     return result
 
 
-def format_report(report: Dict[str, List[str]]) -> str:
+def format_report(
+    report: Dict[str, List[str]], diagnostics: Sequence[str] = ()
+) -> str:
     """Create a human-readable report of the updates performed."""
 
-    if not report:
-        return "No matching placeholders were found."
+    lines: List[str] = []
+    if report:
+        lines.append("Placeholder updates applied:")
+        for sheet, entries in report.items():
+            lines.append(f"• {sheet}:")
+            for entry in entries:
+                lines.append(f"  - {entry}")
+    else:
+        lines.append("No matching placeholders were found.")
 
-    lines = ["Placeholder updates applied:"]
-    for sheet, entries in report.items():
-        lines.append(f"• {sheet}:")
-        for entry in entries:
-            lines.append(f"  - {entry}")
+    if diagnostics:
+        if lines:
+            lines.append("")
+        lines.append("Diagnostics:")
+        for entry in diagnostics:
+            lines.append(f"• {entry}")
+
     return "\n".join(lines)
 
 
