@@ -554,7 +554,7 @@ def generate_placeholders_for_sheet(
         "effectiveFormat(backgroundColor,backgroundColorStyle),"
         "userEnteredFormat(backgroundColor,backgroundColorStyle)"
         "))))"
-        ",spreadsheetTheme(themeColors(colorType,colorStyle(rgbColor)))"
+        ",spreadsheetTheme(themeColors(colorType,color(rgbColor)))"
     )
     get_kwargs = {
         "spreadsheetId": spreadsheet_id,
@@ -668,7 +668,7 @@ def _build_theme_color_map(
         if not isinstance(entry, dict):
             continue
         name = entry.get("colorType")
-        style = entry.get("colorStyle", {})
+        style = entry.get("color", entry.get("colorStyle", {}))
         rgb_color = {}
         if isinstance(style, dict):
             rgb_color = style.get("rgbColor", {})
