@@ -325,8 +325,15 @@ class GoogleDriveCredentialsManager:
         )
         authorize_button.grid(row=row + 1, column=1, sticky="e", pady=8)
 
+        import_button = ttk.Button(
+            self.parent,
+            text="Import saved credentials...",
+            command=self.import_saved_credentials,
+        )
+        import_button.grid(row=row + 2, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
         ttk.Label(self.parent, text="Currently Logged-in User:").grid(
-            row=row + 2, column=0, sticky="w"
+            row=row + 3, column=0, sticky="w"
         )
 
         user_display = ttk.Entry(
@@ -334,7 +341,7 @@ class GoogleDriveCredentialsManager:
             textvariable=self.logged_in_user_var,
             state="readonly",
         )
-        user_display.grid(row=row + 2, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        user_display.grid(row=row + 3, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
 
         status_label = ttk.Label(
             self.parent,
@@ -343,7 +350,7 @@ class GoogleDriveCredentialsManager:
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        status_label.grid(row=row + 4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         self.set_status("No credentials loaded.", log=False)
         self._load_persisted_credentials()
@@ -397,6 +404,61 @@ class GoogleDriveCredentialsManager:
             self.parent.after(0, _on_success)
 
         threading.Thread(target=_run_flow, daemon=True).start()
+
+    def import_saved_credentials(self) -> None:
+        filename = filedialog.askopenfilename(
+            parent=self.parent,
+            title="Select authorized credentials file",
+            filetypes=[("JSON files", "*.json"), ("All files", "*")],
+        )
+        if not filename:
+            return
+
+        if Credentials is None:
+            self.set_status(
+                "google-auth-oauthlib is not installed. Install it with 'pip install google-auth-oauthlib'."
+            )
+            return
+
+        try:
+            imported_credentials = Credentials.from_authorized_user_file(
+                filename, self.SCOPES
+            )
+        except Exception as exc:  # pragma: no cover - file parsing
+            self.set_status(f"Failed to import credentials: {exc}"[:500])
+            return
+
+        if not imported_credentials.valid and getattr(
+            imported_credentials, "refresh_token", None
+        ):
+            if Request is None:
+                self.set_status(
+                    "Imported credentials have expired but google-auth is missing the Requests transport."
+                )
+                return
+            try:
+                imported_credentials.refresh(Request())
+            except Exception as exc:  # pragma: no cover - network interaction
+                self.set_status(f"Failed to refresh imported credentials: {exc}"[:500])
+                return
+
+        if not imported_credentials.valid:
+            self.set_status(
+                "Imported credentials are invalid. Try authorizing the account again."
+            )
+            return
+
+        self._credentials = imported_credentials
+        self.credentials_path_var.set(filename)
+        message = self._persist_credentials(imported_credentials)
+        if message is None:
+            message = "Credentials imported successfully."
+        elif message.startswith("Authorization successful."):
+            message = message.replace(
+                "Authorization successful.", "Credentials imported successfully."
+            )
+        self.set_status(message)
+        self._schedule_user_poll(0)
 
     def set_status(self, message: str, *, log: bool = True) -> None:
         self._status_var.set(message)
