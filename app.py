@@ -120,8 +120,8 @@ class GoogleDriveCredentialsManager:
     def __init__(self, parent: ttk.Frame) -> None:
         self.parent = parent
         self.credentials_path_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="No credentials loaded.")
         self._credentials: Optional[Credentials] = None
+        self._status_display: Optional[tk.Text] = None
 
     @property
     def credentials(self) -> Optional[Credentials]:
@@ -153,12 +153,52 @@ class GoogleDriveCredentialsManager:
         )
         authorize_button.grid(row=row + 1, column=1, sticky="e", pady=8)
 
-        ttk.Label(
+        status_display = tk.Text(
             self.parent,
-            textvariable=self.status_var,
-            wraplength=500,
-            foreground="#1a73e8",
-        ).grid(row=row + 2, column=0, columnspan=2, sticky="w")
+            height=4,
+            wrap="word",
+            borderwidth=1,
+            relief="solid",
+            cursor="xterm",
+        )
+        background = self.parent.cget("background") or status_display.cget("background")
+        status_display.configure(background=background)
+        status_display.tag_configure("status", foreground="#1a73e8")
+        status_display.grid(row=row + 2, column=0, columnspan=2, sticky="nsew", pady=(0, 4))
+
+        def _on_key(event: tk.Event) -> str | None:  # type: ignore[name-defined]
+            control_pressed = bool(event.state & 0x4)
+            command_pressed = bool(event.state & 0x200000)
+            if control_pressed or command_pressed:
+                if event.keysym.lower() in {"a", "c"}:
+                    return None
+                return "break"
+            if event.keysym in {
+                "Left",
+                "Right",
+                "Up",
+                "Down",
+                "Home",
+                "End",
+                "Next",
+                "Prior",
+                "Shift_L",
+                "Shift_R",
+                "Control_L",
+                "Control_R",
+                "Meta_L",
+                "Meta_R",
+            }:
+                return None
+            if event.keysym in {"BackSpace", "Delete", "Return", "KP_Enter"}:
+                return "break"
+            if event.char and event.char.isprintable():
+                return "break"
+            return None
+
+        status_display.bind("<Key>", _on_key)
+        self._status_display = status_display
+        self.set_status("No credentials loaded.")
 
     def select_credentials_file(self) -> None:
         filename = filedialog.askopenfilename(
@@ -168,21 +208,21 @@ class GoogleDriveCredentialsManager:
         )
         if filename:
             self.credentials_path_var.set(filename)
-            self.status_var.set("Credentials file selected. Click Authorize to continue.")
+            self.set_status("Credentials file selected. Click Authorize to continue.")
 
     def authorize(self) -> None:
         credentials_path = self.credentials_path_var.get().strip()
         if not credentials_path:
-            self.status_var.set("Please select a credentials.json file first.")
+            self.set_status("Please select a credentials.json file first.")
             return
 
         if InstalledAppFlow is None:
-            self.status_var.set(
+            self.set_status(
                 "google-auth-oauthlib is not installed. Install it with 'pip install google-auth-oauthlib'."
             )
             return
 
-        self.status_var.set("Starting OAuth flow...")
+        self.set_status("Starting OAuth flow...")
 
         def _run_flow() -> None:
             try:
@@ -193,19 +233,26 @@ class GoogleDriveCredentialsManager:
             except Exception as exc:  # pragma: no cover - user driven
                 self.parent.after(
                     0,
-                    lambda: self.status_var.set(
-                        f"Authorization failed: {exc}"[:500]
-                    ),
+                    lambda: self.set_status(f"Authorization failed: {exc}"[:500]),
                 )
                 return
 
             def _on_success() -> None:
                 self._credentials = credentials
-                self.status_var.set("Authorization successful. Credentials are loaded in memory.")
+                self.set_status("Authorization successful. Credentials are loaded in memory.")
 
             self.parent.after(0, _on_success)
 
         threading.Thread(target=_run_flow, daemon=True).start()
+
+    def set_status(self, message: str) -> None:
+        if self._status_display is None:
+            return
+        widget = self._status_display
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", message, "status")
+        widget.configure(state="normal")
 
 
 class ROSPlaceholderGeneratorUI:
@@ -222,7 +269,8 @@ class ROSPlaceholderGeneratorUI:
         self.parent = parent
         self.credentials_manager = credentials_manager
         self.sheet_url_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="Paste a Google Sheets link to begin.")
+        self._status_display: Optional[tk.Text] = None
+        self._default_status = "Paste a Google Sheets link to begin."
 
     def render(self, row: int) -> None:
         ttk.Label(self.parent, text="Google Sheets URL:").grid(
@@ -242,48 +290,98 @@ class ROSPlaceholderGeneratorUI:
         )
         generate_button.grid(row=row + 1, column=0, columnspan=2, sticky="e", pady=8)
 
-        ttk.Label(
+        status_display = tk.Text(
             self.parent,
-            textvariable=self.status_var,
-            wraplength=500,
-        ).grid(row=row + 2, column=0, columnspan=2, sticky="w")
+            height=6,
+            wrap="word",
+            borderwidth=1,
+            relief="solid",
+            cursor="xterm",
+        )
+        background = self.parent.cget("background") or status_display.cget("background")
+        status_display.configure(background=background)
+        status_display.tag_configure("status", foreground="black")
+        status_display.grid(row=row + 2, column=0, columnspan=2, sticky="nsew", pady=(0, 4))
+
+        def _on_key(event: tk.Event) -> str | None:  # type: ignore[name-defined]
+            control_pressed = bool(event.state & 0x4)
+            command_pressed = bool(event.state & 0x200000)
+            if control_pressed or command_pressed:
+                if event.keysym.lower() in {"a", "c"}:
+                    return None
+                return "break"
+            if event.keysym in {
+                "Left",
+                "Right",
+                "Up",
+                "Down",
+                "Home",
+                "End",
+                "Next",
+                "Prior",
+                "Shift_L",
+                "Shift_R",
+                "Control_L",
+                "Control_R",
+                "Meta_L",
+                "Meta_R",
+            }:
+                return None
+            if event.keysym in {"BackSpace", "Delete", "Return", "KP_Enter"}:
+                return "break"
+            if event.char and event.char.isprintable():
+                return "break"
+            return None
+
+        status_display.bind("<Key>", _on_key)
+        self._status_display = status_display
+        self.set_status(self._default_status)
 
     def generate_placeholders(self) -> None:
         sheet_url = self.sheet_url_var.get().strip()
         if not sheet_url:
-            self.status_var.set("Please paste a Google Sheets link.")
+            self.set_status("Please paste a Google Sheets link.")
             return
 
         credentials = self.credentials_manager.credentials
         if credentials is None:
-            self.status_var.set("Load Google Drive credentials before running this tool.")
+            self.set_status("Load Google Drive credentials before running this tool.")
             return
 
         if build is None:
-            self.status_var.set(
+            self.set_status(
                 "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
             )
             return
 
         spreadsheet_id = extract_spreadsheet_id(sheet_url)
         if not spreadsheet_id:
-            self.status_var.set("Unable to determine spreadsheet ID from the provided link.")
+            self.set_status("Unable to determine spreadsheet ID from the provided link.")
             return
 
-        self.status_var.set("Contacting Google Sheets API...")
+        self.set_status("Contacting Google Sheets API...")
 
         def _worker() -> None:
             try:
                 report = generate_placeholders_for_sheet(credentials, spreadsheet_id)
             except Exception as exc:  # pragma: no cover - network interaction
                 message = f"Failed to update spreadsheet: {exc}"[:500]
-                self.parent.after(0, lambda: self.status_var.set(message))
+                self.parent.after(0, lambda: self.set_status(message))
                 return
 
             success_message = format_report(report)
-            self.parent.after(0, lambda: self.status_var.set(success_message))
+            self.parent.after(0, lambda: self.set_status(success_message))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def set_status(self, message: str) -> None:
+        if self._status_display is None:
+            return
+        widget = self._status_display
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", message, "status")
+        widget.configure(state="normal")
 
 
 def extract_spreadsheet_id(url: str) -> str:
@@ -325,6 +423,7 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
         .get(
             spreadsheetId=spreadsheet_id,
             includeGridData=True,
+            supportsAllDrives=True,
             fields="sheets(properties(title,sheetId,index),data(rowData(values(userEnteredValue,formattedValue,effectiveFormat(backgroundColor)))) )",
         )
         .execute()
@@ -372,6 +471,7 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
     if data_updates:
         service.spreadsheets().values().batchUpdate(
             spreadsheetId=spreadsheet_id,
+            supportsAllDrives=True,
             body={
                 "valueInputOption": "USER_ENTERED",
                 "data": data_updates,
