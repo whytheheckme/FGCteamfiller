@@ -16,8 +16,9 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
 
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, ttk
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - optional dependency
     from google.oauth2.credentials import Credentials
@@ -30,6 +31,11 @@ try:  # pragma: no cover - optional dependency
     from googleapiclient.discovery import build
 except ModuleNotFoundError:  # pragma: no cover - handled at runtime
     build = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    from google.auth.transport.requests import Request
+except ModuleNotFoundError:  # pragma: no cover - handled at runtime
+    Request = None  # type: ignore[assignment]
 
 
 def _get_widget_background(widget: tk.Misc, fallback: tk.Misc) -> str:
@@ -136,6 +142,7 @@ class GoogleDriveCredentialsManager:
         "https://www.googleapis.com/auth/drive.readonly",
         "https://www.googleapis.com/auth/spreadsheets",
     ]
+    STORAGE_PATH = Path.home() / ".fgc_team_filler" / "google_credentials.json"
 
     def __init__(self, parent: ttk.Frame) -> None:
         self.parent = parent
@@ -146,6 +153,38 @@ class GoogleDriveCredentialsManager:
     @property
     def credentials(self) -> Optional[Credentials]:
         return self._credentials
+
+    def get_valid_credentials(self) -> Tuple[Optional[Credentials], Optional[str]]:
+        """Return credentials that are refreshed and valid, or an error message."""
+
+        credentials = self._credentials
+        if credentials is None:
+            return None, None
+
+        if credentials.expired and getattr(credentials, "refresh_token", None):
+            if Request is None:
+                message = (
+                    "Stored credentials have expired and google-auth-transport-requests is missing. "
+                    "Install it with 'pip install google-auth'."
+                )
+                self.set_status(message)
+                return None, message
+            try:
+                credentials.refresh(Request())
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to refresh credentials: {exc}"[:500]
+                self.set_status(message)
+                return None, message
+            else:
+                self._credentials = credentials
+                self._persist_credentials(credentials)
+
+        if not credentials.valid:
+            message = "Stored credentials are invalid. Please re-authorize."
+            self.set_status(message)
+            return None, message
+
+        return credentials, None
 
     def render(self, row: int) -> None:
         ttk.Label(self.parent, text="Credentials file:").grid(
@@ -220,6 +259,9 @@ class GoogleDriveCredentialsManager:
         self._status_display = status_display
         self.set_status("No credentials loaded.")
 
+        # Attempt to load persisted credentials immediately.
+        self._load_persisted_credentials()
+
     def select_credentials_file(self) -> None:
         filename = filedialog.askopenfilename(
             parent=self.parent,
@@ -259,7 +301,10 @@ class GoogleDriveCredentialsManager:
 
             def _on_success() -> None:
                 self._credentials = credentials
-                self.set_status("Authorization successful. Credentials are loaded in memory.")
+                message = self._persist_credentials(credentials)
+                if message is None:
+                    message = "Authorization successful. Credentials are loaded in memory."
+                self.set_status(message)
 
             self.parent.after(0, _on_success)
 
@@ -273,6 +318,56 @@ class GoogleDriveCredentialsManager:
         widget.delete("1.0", tk.END)
         widget.insert("1.0", message, "status")
         widget.configure(state="normal")
+
+    def _load_persisted_credentials(self) -> None:
+        if Credentials is None:
+            return
+
+        storage_path = self.STORAGE_PATH
+        if not storage_path.exists():
+            return
+
+        try:
+            credentials = Credentials.from_authorized_user_file(
+                str(storage_path), self.SCOPES
+            )
+        except Exception as exc:  # pragma: no cover - file parsing
+            self.set_status(f"Failed to load saved credentials: {exc}"[:500])
+            return
+
+        if not credentials.valid and getattr(credentials, "refresh_token", None):
+            if Request is None:
+                self.set_status(
+                    "Saved credentials are expired but google-auth is missing the Requests transport."
+                )
+                return
+            try:
+                credentials.refresh(Request())
+            except Exception as exc:  # pragma: no cover - network interaction
+                self.set_status(f"Failed to refresh saved credentials: {exc}"[:500])
+                return
+
+        if credentials.valid:
+            self._credentials = credentials
+            self.set_status("Loaded saved credentials. You're ready to go.")
+            self._persist_credentials(credentials)
+        else:
+            self.set_status("Saved credentials are invalid. Please re-authorize.")
+
+    def _persist_credentials(self, credentials: Credentials) -> Optional[str]:
+        if Credentials is None:
+            return None
+
+        storage_path = self.STORAGE_PATH
+        try:
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_path.write_text(credentials.to_json())
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            return (
+                "Authorization succeeded, but saving credentials failed: "
+                f"{exc}"[:500]
+            )
+        return f"Authorization successful. Credentials saved to {storage_path}."
 
 
 class ROSPlaceholderGeneratorUI:
@@ -363,9 +458,12 @@ class ROSPlaceholderGeneratorUI:
             self.set_status("Please paste a Google Sheets link.")
             return
 
-        credentials = self.credentials_manager.credentials
+        credentials, error = self.credentials_manager.get_valid_credentials()
         if credentials is None:
-            self.set_status("Load Google Drive credentials before running this tool.")
+            if error:
+                self.set_status(error)
+            else:
+                self.set_status("Load Google Drive credentials before running this tool.")
             return
 
         if build is None:
@@ -442,7 +540,11 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
     get_kwargs = {
         "spreadsheetId": spreadsheet_id,
         "includeGridData": True,
-        "fields": "sheets(properties(title,sheetId,index),data(rowData(values(userEnteredValue,formattedValue,effectiveFormat(backgroundColor)))) )",
+        "fields": (
+            "sheets(properties(title,sheetId,index),"
+            "data(rowData(values(userEnteredValue,formattedValue,"
+            "effectiveFormat(backgroundColor)))))"
+        ),
     }
     if _method_supports_parameter(spreadsheets_resource.get, "supportsAllDrives"):
         get_kwargs["supportsAllDrives"] = True
