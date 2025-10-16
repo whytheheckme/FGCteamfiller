@@ -438,16 +438,16 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
     """
 
     service = build("sheets", "v4", credentials=credentials)
-    spreadsheet = (
-        service.spreadsheets()
-        .get(
-            spreadsheetId=spreadsheet_id,
-            includeGridData=True,
-            supportsAllDrives=True,
-            fields="sheets(properties(title,sheetId,index),data(rowData(values(userEnteredValue,formattedValue,effectiveFormat(backgroundColor)))) )",
-        )
-        .execute()
-    )
+    spreadsheets_resource = service.spreadsheets()
+    get_kwargs = {
+        "spreadsheetId": spreadsheet_id,
+        "includeGridData": True,
+        "fields": "sheets(properties(title,sheetId,index),data(rowData(values(userEnteredValue,formattedValue,effectiveFormat(backgroundColor)))) )",
+    }
+    if _method_supports_parameter(spreadsheets_resource.get, "supportsAllDrives"):
+        get_kwargs["supportsAllDrives"] = True
+
+    spreadsheet = spreadsheets_resource.get(**get_kwargs).execute()
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
     data_updates: List[Dict[str, Sequence[Sequence[str]]]] = []
@@ -489,14 +489,18 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
             )
 
     if data_updates:
-        service.spreadsheets().values().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            supportsAllDrives=True,
-            body={
+        values_resource = service.spreadsheets().values()
+        batch_update_kwargs = {
+            "spreadsheetId": spreadsheet_id,
+            "body": {
                 "valueInputOption": "USER_ENTERED",
                 "data": data_updates,
             },
-        ).execute()
+        }
+        if _method_supports_parameter(values_resource.batchUpdate, "supportsAllDrives"):
+            batch_update_kwargs["supportsAllDrives"] = True
+
+        values_resource.batchUpdate(**batch_update_kwargs).execute()
 
     return {
         sheet: [f"{cell}: {text}" for cell, text in entries]
@@ -579,6 +583,16 @@ def format_report(report: Dict[str, List[str]]) -> str:
         for entry in entries:
             lines.append(f"  - {entry}")
     return "\n".join(lines)
+
+
+def _method_supports_parameter(method: object, parameter: str) -> bool:
+    """Return True if a Google API client method accepts the given parameter."""
+
+    method_desc = getattr(method, "_methodDesc", {})
+    if isinstance(method_desc, dict):
+        parameters = method_desc.get("parameters", {})
+        return isinstance(parameters, dict) and parameter in parameters
+    return False
 
 
 def main() -> None:
