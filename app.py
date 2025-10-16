@@ -375,7 +375,11 @@ class GoogleDriveCredentialsManager:
 class ROSPlaceholderGeneratorUI:
     """User interface wrapper for the ROS placeholder generator tool."""
 
-    COLOR_TARGET = (0.698, 0.843, 0.984)
+    # Light Cornflower Blue 3 as exported by Google Sheets, used to flag
+    # placeholder cells. The previous value was copied from an external source
+    # and did not match the actual cell color (≈#C9DAF8), causing detection to
+    # miss legitimately highlighted rows.
+    COLOR_TARGET = (0.788, 0.855, 0.973)
     COLOR_TOLERANCE = 0.05
 
     def __init__(
