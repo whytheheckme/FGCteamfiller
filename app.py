@@ -18,7 +18,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - optional dependency
     from google.oauth2.credentials import Credentials
@@ -545,14 +545,21 @@ def generate_placeholders_for_sheet(
 
     service = build("sheets", "v4", credentials=credentials)
     spreadsheets_resource = service.spreadsheets()
+    fields = (
+        "sheets("
+        "properties(title,sheetId,index),"
+        "data(rowData(values("
+        "userEnteredValue,"
+        "formattedValue,"
+        "effectiveFormat(backgroundColor,backgroundColorStyle),"
+        "userEnteredFormat(backgroundColor,backgroundColorStyle)"
+        "))))"
+        ",spreadsheetTheme(themeColors(colorType,colorStyle(rgbColor)))"
+    )
     get_kwargs = {
         "spreadsheetId": spreadsheet_id,
         "includeGridData": True,
-        "fields": (
-            "sheets(properties(title,sheetId,index),"
-            "data(rowData(values(userEnteredValue,formattedValue,"
-            "effectiveFormat(backgroundColor)))))"
-        ),
+        "fields": fields,
     }
     if _method_supports_parameter(spreadsheets_resource.get, "supportsAllDrives"):
         get_kwargs["supportsAllDrives"] = True
@@ -583,6 +590,8 @@ def generate_placeholders_for_sheet(
     ]
     data_updates: List[Dict[str, Sequence[Sequence[str]]]] = []
 
+    theme_colors = _build_theme_color_map(spreadsheet.get("spreadsheetTheme", {}))
+
     for sheet in spreadsheet.get("sheets", []):
         properties = sheet.get("properties", {})
         title = properties.get("title", "Untitled")
@@ -604,7 +613,7 @@ def generate_placeholders_for_sheet(
         )
 
         matching_cells = find_placeholder_cells(
-            sheet_data, task_column, diagnostics, title
+            sheet_data, task_column, diagnostics, title, theme_colors
         )
         if not matching_cells:
             diagnostics.append(
@@ -649,6 +658,33 @@ def generate_placeholders_for_sheet(
     )
 
 
+def _build_theme_color_map(
+    spreadsheet_theme: Dict[str, Any]
+) -> Dict[str, Dict[str, float]]:
+    """Return a mapping of theme color names to resolved RGB components."""
+
+    theme_colors: Dict[str, Dict[str, float]] = {}
+    for entry in spreadsheet_theme.get("themeColors", []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("colorType")
+        style = entry.get("colorStyle", {})
+        rgb_color = {}
+        if isinstance(style, dict):
+            rgb_color = style.get("rgbColor", {})
+        if (
+            isinstance(name, str)
+            and isinstance(rgb_color, dict)
+            and rgb_color
+        ):
+            theme_colors[name] = {
+                "red": float(rgb_color.get("red", 1.0)),
+                "green": float(rgb_color.get("green", 1.0)),
+                "blue": float(rgb_color.get("blue", 1.0)),
+            }
+    return theme_colors
+
+
 def find_task_column(sheet_data: Sequence[dict]) -> Optional[int]:
     """Locate the zero-based column index containing the TASK header."""
 
@@ -674,6 +710,7 @@ def find_placeholder_cells(
     column_index: int,
     diagnostics: Optional[List[str]] = None,
     sheet_title: str = "",
+    theme_colors: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> List[int]:
     """Return the row indices containing the target placeholder color."""
 
@@ -681,19 +718,17 @@ def find_placeholder_cells(
     seen_rows: set[int] = set()
     sample_count = 0
     for row_index, cell in _iter_column_cells(sheet_data, column_index):
-        effective_format = cell.get("effectiveFormat", {})
-        color = (
-            effective_format.get("backgroundColor")
-            or effective_format.get("backgroundColorStyle", {}).get("rgbColor", {})
-            or {}
-        )
+        color, color_source = _get_cell_color(cell, theme_colors)
 
         if diagnostics is not None and sample_count < 5:
             red = color.get("red", 1.0)
             green = color.get("green", 1.0)
             blue = color.get("blue", 1.0)
             diagnostics.append(
-                f"{sheet_title}: Row {row_index + 1} color rgb=({red:.3f}, {green:.3f}, {blue:.3f})."
+                (
+                    f"{sheet_title}: Row {row_index + 1} color rgb=({red:.3f}, {green:.3f}, {blue:.3f})"
+                    f" from {color_source}."
+                )
             )
             sample_count += 1
 
@@ -702,6 +737,65 @@ def find_placeholder_cells(
                 matches.append(row_index)
                 seen_rows.add(row_index)
     return matches
+
+
+def _get_cell_color(
+    cell: Dict[str, Any], theme_colors: Optional[Dict[str, Dict[str, float]]]
+) -> Tuple[Dict[str, float], str]:
+    """Extract a color dictionary and describe the source used."""
+
+    sources = (
+        ("effectiveFormat", cell.get("effectiveFormat", {})),
+        ("userEnteredFormat", cell.get("userEnteredFormat", {})),
+    )
+
+    for prefix, fmt in sources:
+        if not isinstance(fmt, dict):
+            continue
+
+        background = fmt.get("backgroundColor")
+        if isinstance(background, dict) and background:
+            return (
+                {
+                    "red": float(background.get("red", 1.0)),
+                    "green": float(background.get("green", 1.0)),
+                    "blue": float(background.get("blue", 1.0)),
+                },
+                f"{prefix}.backgroundColor",
+            )
+
+        style = fmt.get("backgroundColorStyle")
+        if not isinstance(style, dict):
+            continue
+
+        rgb_color = style.get("rgbColor")
+        if isinstance(rgb_color, dict) and rgb_color:
+            return (
+                {
+                    "red": float(rgb_color.get("red", 1.0)),
+                    "green": float(rgb_color.get("green", 1.0)),
+                    "blue": float(rgb_color.get("blue", 1.0)),
+                },
+                f"{prefix}.backgroundColorStyle.rgbColor",
+            )
+
+        theme_name = style.get("themeColor")
+        if (
+            isinstance(theme_name, str)
+            and theme_colors is not None
+            and theme_name in theme_colors
+        ):
+            theme_color = theme_colors[theme_name]
+            return (
+                {
+                    "red": float(theme_color.get("red", 1.0)),
+                    "green": float(theme_color.get("green", 1.0)),
+                    "blue": float(theme_color.get("blue", 1.0)),
+                },
+                f"{prefix}.backgroundColorStyle.themeColor={theme_name}",
+            )
+
+    return ({"red": 1.0, "green": 1.0, "blue": 1.0}, "default")
 
 
 def _iter_column_cells(
