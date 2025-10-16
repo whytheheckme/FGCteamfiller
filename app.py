@@ -4,6 +4,16 @@ This module launches a simple Tkinter application with two tabs for
 future expansion.
 """
 
+from __future__ import annotations
+
+import importlib.util
+
+if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-time guard
+    raise ModuleNotFoundError(
+        "tkinter is not available in this Python installation. "
+        "On macOS with Homebrew Python, install it with 'brew install python-tk@3.13'."
+    )
+
 import tkinter as tk
 from tkinter import ttk
 
