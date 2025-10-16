@@ -29,8 +29,10 @@ except ModuleNotFoundError:  # pragma: no cover - handled at runtime
 
 try:  # pragma: no cover - optional dependency
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
 except ModuleNotFoundError:  # pragma: no cover - handled at runtime
     build = None  # type: ignore[assignment]
+    HttpError = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional dependency
     from google.auth.transport.requests import Request
@@ -549,7 +551,21 @@ def generate_placeholders_for_sheet(credentials: Credentials, spreadsheet_id: st
     if _method_supports_parameter(spreadsheets_resource.get, "supportsAllDrives"):
         get_kwargs["supportsAllDrives"] = True
 
-    spreadsheet = spreadsheets_resource.get(**get_kwargs).execute()
+    try:
+        spreadsheet = spreadsheets_resource.get(**get_kwargs).execute()
+    except Exception as exc:
+        if HttpError is not None and isinstance(exc, HttpError):
+            status = getattr(exc, "status_code", None) or getattr(exc, "resp", None)
+            if hasattr(status, "status"):
+                status = getattr(status, "status")
+            message = str(exc)
+            if status == 400 and "not supported for this document" in message.lower():
+                raise ValueError(
+                    "The selected file is stored in Office Compatibility mode. "
+                    "Open it in Google Sheets and use File → Save as Google Sheets, "
+                    "then try again."
+                ) from exc
+        raise
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
     data_updates: List[Dict[str, Sequence[Sequence[str]]]] = []
