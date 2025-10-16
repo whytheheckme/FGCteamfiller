@@ -545,7 +545,7 @@ def generate_placeholders_for_sheet(
 
     service = build("sheets", "v4", credentials=credentials)
     spreadsheets_resource = service.spreadsheets()
-    fields = (
+    base_fields = (
         "sheets("
         "properties(title,sheetId,index),"
         "data(rowData(values("
@@ -554,13 +554,14 @@ def generate_placeholders_for_sheet(
         "effectiveFormat(backgroundColor,backgroundColorStyle),"
         "userEnteredFormat(backgroundColor,backgroundColorStyle)"
         "))))"
-        ",spreadsheetTheme"
     )
+    fields_with_theme = base_fields + ",spreadsheetTheme"
     get_kwargs = {
         "spreadsheetId": spreadsheet_id,
         "includeGridData": True,
-        "fields": fields,
+        "fields": fields_with_theme,
     }
+    theme_supported = True
     if _method_supports_parameter(spreadsheets_resource.get, "supportsAllDrives"):
         get_kwargs["supportsAllDrives"] = True
 
@@ -578,7 +579,14 @@ def generate_placeholders_for_sheet(
                     "Open it in Google Sheets and use File → Save as Google Sheets, "
                     "then try again."
                 ) from exc
-        raise
+            if status == 400 and "spreadsheettheme" in message.lower():
+                fallback_kwargs = dict(get_kwargs, fields=base_fields)
+                spreadsheet = spreadsheets_resource.get(**fallback_kwargs).execute()
+                theme_supported = False
+            else:
+                raise
+        else:
+            raise
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
     diagnostics: List[str] = [
@@ -589,6 +597,11 @@ def generate_placeholders_for_sheet(
         )
     ]
     data_updates: List[Dict[str, Sequence[Sequence[str]]]] = []
+
+    if not theme_supported:
+        diagnostics.append(
+            "Spreadsheet theme colors were unavailable; falling back to raw RGB values."
+        )
 
     theme_colors = _build_theme_color_map(spreadsheet.get("spreadsheetTheme", {}))
 
