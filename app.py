@@ -554,7 +554,7 @@ def generate_placeholders_for_sheet(
         "effectiveFormat(backgroundColor,backgroundColorStyle),"
         "userEnteredFormat(backgroundColor,backgroundColorStyle)"
         "))))"
-        ",spreadsheetTheme(themeColors)"
+        ",spreadsheetTheme"
     )
     get_kwargs = {
         "spreadsheetId": spreadsheet_id,
