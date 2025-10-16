@@ -495,6 +495,7 @@ class GoogleDriveCredentialsManager:
 
         if credentials.valid:
             self._credentials = credentials
+            self.credentials_path_var.set(str(storage_path))
             self.set_status("Loaded saved credentials. You're ready to go.")
             self._persist_credentials(credentials)
             self._schedule_user_poll(0)
@@ -514,6 +515,7 @@ class GoogleDriveCredentialsManager:
                 "Authorization succeeded, but saving credentials failed: "
                 f"{exc}"[:500]
             )
+        self.credentials_path_var.set(str(storage_path))
         return f"Authorization successful. Credentials saved to {storage_path}."
 
     def _schedule_user_poll(self, delay_ms: int) -> None:
