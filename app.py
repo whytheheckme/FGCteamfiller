@@ -487,7 +487,7 @@ class ROSPlaceholderGeneratorUI:
                     credentials, spreadsheet_id
                 )
             except Exception as exc:  # pragma: no cover - network interaction
-                message = f"Failed to update spreadsheet: {exc}"[:500]
+                message = f"Failed to update spreadsheet: {exc}"
                 self.parent.after(0, lambda: self.set_status(message))
                 return
 
