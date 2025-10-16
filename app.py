@@ -757,9 +757,16 @@ def _get_cell_color(
 ) -> Tuple[Dict[str, float], str]:
     """Extract a color dictionary and describe the source used."""
 
+    # ``userEnteredFormat`` contains the formatting explicitly applied by the
+    # user, whereas ``effectiveFormat`` reflects the resolved styling Google
+    # Sheets would display.  When a spreadsheet is opened in compatibility
+    # mode, ``effectiveFormat`` often reports the default white background even
+    # though ``userEnteredFormat`` retains the actual fill color we need to
+    # detect placeholders.  Prefer the user-entered data and fall back to the
+    # effective values if necessary.
     sources = (
-        ("effectiveFormat", cell.get("effectiveFormat", {})),
         ("userEnteredFormat", cell.get("userEnteredFormat", {})),
+        ("effectiveFormat", cell.get("effectiveFormat", {})),
     )
 
     for prefix, fmt in sources:
