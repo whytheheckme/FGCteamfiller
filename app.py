@@ -32,6 +32,26 @@ except ModuleNotFoundError:  # pragma: no cover - handled at runtime
     build = None  # type: ignore[assignment]
 
 
+def _get_widget_background(widget: tk.Misc, fallback: tk.Misc) -> str:
+    """Return a usable background color for a widget.
+
+    ttk widgets such as ``ttk.Frame`` don't expose a ``-background`` option,
+    which results in a ``TclError`` when ``cget("background")`` is called.
+    This helper gracefully handles that case by falling back to the top-level
+    window's background or, ultimately, the fallback widget's current
+    background color.
+    """
+
+    for candidate in (widget, widget.winfo_toplevel(), fallback):
+        try:
+            background = str(candidate.cget("background"))
+        except tk.TclError:
+            continue
+        if background:
+            return background
+    return str(fallback.cget("background"))
+
+
 def create_main_window() -> tk.Tk:
     """Create and configure the main application window."""
     root = tk.Tk()
@@ -161,7 +181,7 @@ class GoogleDriveCredentialsManager:
             relief="solid",
             cursor="xterm",
         )
-        background = self.parent.cget("background") or status_display.cget("background")
+        background = _get_widget_background(self.parent, status_display)
         status_display.configure(background=background)
         status_display.tag_configure("status", foreground="#1a73e8")
         status_display.grid(row=row + 2, column=0, columnspan=2, sticky="nsew", pady=(0, 4))
@@ -298,7 +318,7 @@ class ROSPlaceholderGeneratorUI:
             relief="solid",
             cursor="xterm",
         )
-        background = self.parent.cget("background") or status_display.cget("background")
+        background = _get_widget_background(self.parent, status_display)
         status_display.configure(background=background)
         status_display.tag_configure("status", foreground="black")
         status_display.grid(row=row + 2, column=0, columnspan=2, sticky="nsew", pady=(0, 4))
