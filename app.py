@@ -630,7 +630,7 @@ def generate_placeholders_for_sheet(
             updates[title].append((cell_a1, text))
             data_updates.append(
                 {
-                    "range": f"'{title}'!{cell_a1}:{cell_a1}",
+                    "range": single_cell_range(title, cell_a1),
                     "values": [[text]],
                 }
             )
@@ -854,6 +854,13 @@ def column_index_to_letter(index: int) -> str:
         index, remainder = divmod(index - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+def single_cell_range(sheet_title: str, cell_a1: str) -> str:
+    """Return a properly quoted A1 range for a single cell."""
+
+    escaped_title = sheet_title.replace("'", "''")
+    return f"'{escaped_title}'!{cell_a1}:{cell_a1}"
 
 
 def format_report(
