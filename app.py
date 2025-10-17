@@ -16,9 +16,12 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
 
 import itertools
 import json
+import math
 import re
 import threading
 import tkinter as tk
+import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -49,6 +52,420 @@ PLACEHOLDER_CODE_PATTERN = re.compile(
     r"^TEAM VIDEO PLACEHOLDER ([A-Z]{3})\b",
     re.IGNORECASE,
 )
+RANKING_MATCH_NUMBER_PATTERN = re.compile(r"RANKING MATCH\s*#?\s*(\d+)", re.IGNORECASE)
+
+
+def strip_leading_flag_emoji(text: str) -> str:
+    """Remove a leading emoji flag from *text*, if present."""
+
+    match = FLAG_EMOJI_PATTERN.match(text)
+    if not match:
+        return text.strip()
+    start, end = match.span(1)
+    return (text[:start] + text[end:]).strip()
+
+
+def _extract_numeric_cell_value(cell: Mapping[str, Any]) -> Optional[float]:
+    for key in ("effectiveValue", "userEnteredValue"):
+        value = cell.get(key)
+        if isinstance(value, Mapping):
+            number = value.get("numberValue")
+            if isinstance(number, (int, float)):
+                return float(number)
+    text = _extract_cell_text(dict(cell)) if isinstance(cell, dict) else ""
+    if text:
+        normalized = text.replace(",", "").strip()
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+    return None
+
+
+COUNTRY_CODE_DATA = """
+AFG,AF,Afghanistan
+ALB,AL,Albania
+DZA,DZ,Algeria
+AND,AD,Andorra
+AGO,AO,Angola
+AIA,AI,Anguilla
+ATG,AG,Antigua and Barbuda
+ARG,AR,Argentina
+ARM,AM,Armenia
+ABW,AW,Aruba
+AUS,AU,Australia
+AUT,AT,Austria
+AZE,AZ,Azerbaijan
+BHS,BS,Bahamas
+BHR,BH,Bahrain
+BGD,BD,Bangladesh
+BRB,BB,Barbados
+BLR,BY,Belarus
+BEL,BE,Belgium
+BLZ,BZ,Belize
+BEN,BJ,Benin
+BMU,BM,Bermuda
+BTN,BT,Bhutan
+BOL,BO,Bolivia (Plurinational State of)
+BIH,BA,Bosnia and Herzegovina
+BWA,BW,Botswana
+BRA,BR,Brazil
+BRN,BN,Brunei Darussalam
+BGR,BG,Bulgaria
+BFA,BF,Burkina Faso
+BDI,BI,Burundi
+KHM,KH,Cambodia
+CMR,CM,Cameroon
+CAN,CA,Canada
+CPV,CV,Cabo Verde
+CYM,KY,Cayman Islands
+CAF,CF,Central African Republic
+TCD,TD,Chad
+CHL,CL,Chile
+CHN,CN,China
+COL,CO,Colombia
+COM,KM,Comoros
+COG,CG,Congo
+COD,CD,Democratic Republic of the Congo
+COK,CK,Cook Islands
+CRI,CR,Costa Rica
+CIV,CI,Côte d’Ivoire
+HRV,HR,Croatia
+CUB,CU,Cuba
+CUW,CW,Curaçao
+CYP,CY,Cyprus
+CZE,CZ,Czechia
+DNK,DK,Denmark
+DJI,DJ,Djibouti
+DMA,DM,Dominica
+DOM,DO,Dominican Republic
+ECU,EC,Ecuador
+EGY,EG,Egypt
+SLV,SV,El Salvador
+GNQ,GQ,Equatorial Guinea
+ERI,ER,Eritrea
+EST,EE,Estonia
+SWZ,SZ,Eswatini
+ETH,ET,Ethiopia
+FJI,FJ,Fiji
+FIN,FI,Finland
+FRA,FR,France
+GUF,GF,French Guiana
+PYF,PF,French Polynesia
+GAB,GA,Gabon
+GMB,GM,Gambia
+GEO,GE,Georgia
+DEU,DE,Germany
+GHA,GH,Ghana
+GRC,GR,Greece
+GRD,GD,Grenada
+GLP,GP,Guadeloupe
+GTM,GT,Guatemala
+GGY,GG,Guernsey
+GIN,GN,Guinea
+GNB,GW,Guinea-Bissau
+GUY,GY,Guyana
+HTI,HT,Haiti
+HND,HN,Honduras
+HKG,HK,Hong Kong
+HUN,HU,Hungary
+ISL,IS,Iceland
+IND,IN,India
+IDN,ID,Indonesia
+IRN,IR,Iran (Islamic Republic of)
+IRQ,IQ,Iraq
+IRL,IE,Ireland
+IMN,IM,Isle of Man
+ISR,IL,Israel
+ITA,IT,Italy
+JAM,JM,Jamaica
+JPN,JP,Japan
+JEY,JE,Jersey
+JOR,JO,Jordan
+KAZ,KZ,Kazakhstan
+KEN,KE,Kenya
+KIR,KI,Kiribati
+PRK,KP,Democratic People's Republic of Korea
+KOR,KR,Republic of Korea
+KWT,KW,Kuwait
+KGZ,KG,Kyrgyzstan
+LAO,LA,Lao People's Democratic Republic
+LVA,LV,Latvia
+LBN,LB,Lebanon
+LSO,LS,Lesotho
+LBR,LR,Liberia
+LBY,LY,Libya
+LIE,LI,Liechtenstein
+LTU,LT,Lithuania
+LUX,LU,Luxembourg
+MAC,MO,Macao
+MDG,MG,Madagascar
+MWI,MW,Malawi
+MYS,MY,Malaysia
+MDV,MV,Maldives
+MLI,ML,Mali
+MLT,MT,Malta
+MHL,MH,Marshall Islands
+MTQ,MQ,Martinique
+MRT,MR,Mauritania
+MUS,MU,Mauritius
+MYT,YT,Mayotte
+MEX,MX,Mexico
+FSM,FM,Micronesia (Federated States of)
+MDA,MD,Republic of Moldova
+MCO,MC,Monaco
+MNG,MN,Mongolia
+MNE,ME,Montenegro
+MSR,MS,Montserrat
+MAR,MA,Morocco
+MOZ,MZ,Mozambique
+MMR,MM,Myanmar
+NAM,NA,Namibia
+NRU,NR,Nauru
+NPL,NP,Nepal
+NLD,NL,Netherlands
+NCL,NC,New Caledonia
+NZL,NZ,New Zealand
+NIC,NI,Nicaragua
+NER,NE,Niger
+NGA,NG,Nigeria
+NIU,NU,Niue
+MKD,MK,North Macedonia
+NOR,NO,Norway
+OMN,OM,Oman
+PAK,PK,Pakistan
+PLW,PW,Palau
+PSE,PS,State of Palestine
+PAN,PA,Panama
+PNG,PG,Papua New Guinea
+PRY,PY,Paraguay
+PER,PE,Peru
+PHL,PH,Philippines
+POL,PL,Poland
+PRT,PT,Portugal
+PRI,PR,Puerto Rico
+QAT,QA,Qatar
+REU,RE,Réunion
+ROU,RO,Romania
+RUS,RU,Russian Federation
+RWA,RW,Rwanda
+BLM,BL,Saint Barthélemy
+SHN,SH,Saint Helena, Ascension and Tristan da Cunha
+KNA,KN,Saint Kitts and Nevis
+LCA,LC,Saint Lucia
+MAF,MF,Saint Martin (French part)
+SPM,PM,Saint Pierre and Miquelon
+VCT,VC,Saint Vincent and the Grenadines
+WSM,WS,Samoa
+SMR,SM,San Marino
+STP,ST,Sao Tome and Principe
+SAU,SA,Saudi Arabia
+SEN,SN,Senegal
+SRB,RS,Serbia
+SYC,SC,Seychelles
+SLE,SL,Sierra Leone
+SGP,SG,Singapore
+SXM,SX,Sint Maarten (Dutch part)
+SVK,SK,Slovakia
+SVN,SI,Slovenia
+SLB,SB,Solomon Islands
+SOM,SO,Somalia
+ZAF,ZA,South Africa
+SSD,SS,South Sudan
+ESP,ES,Spain
+LKA,LK,Sri Lanka
+SDN,SD,Sudan
+SUR,SR,Suriname
+SWE,SE,Sweden
+CHE,CH,Switzerland
+SYR,SY,Syrian Arab Republic
+TWN,TW,Taiwan, Province of China
+TJK,TJ,Tajikistan
+TZA,TZ,United Republic of Tanzania
+THA,TH,Thailand
+TLS,TL,Timor-Leste
+TGO,TG,Togo
+TON,TO,Tonga
+TTO,TT,Trinidad and Tobago
+TUN,TN,Tunisia
+TUR,TR,Turkey
+TKM,TM,Turkmenistan
+TCA,TC,Turks and Caicos Islands
+TUV,TV,Tuvalu
+UGA,UG,Uganda
+UKR,UA,Ukraine
+ARE,AE,United Arab Emirates
+GBR,GB,United Kingdom of Great Britain and Northern Ireland
+USA,US,United States of America
+URY,UY,Uruguay
+UZB,UZ,Uzbekistan
+VUT,VU,Vanuatu
+VAT,VA,Vatican City State
+VEN,VE,Bolivarian Republic of Venezuela
+VNM,VN,Viet Nam
+WLF,WF,Wallis and Futuna
+ESH,EH,Western Sahara
+YEM,YE,Yemen
+ZMB,ZM,Zambia
+ZWE,ZW,Zimbabwe
+XKX,XK,Kosovo
+"""
+
+
+ADDITIONAL_COUNTRY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "ARE": ("UAE", "United Arab Emirates"),
+    "BOL": ("Bolivia",),
+    "BRN": ("Brunei",),
+    "CIV": ("Ivory Coast", "Cote d'Ivoire"),
+    "COD": ("DR Congo", "Democratic Republic of Congo", "Congo DR"),
+    "COG": ("Republic of the Congo", "Congo"),
+    "CPV": ("Cape Verde",),
+    "CZE": ("Czech Republic",),
+    "FSM": ("Micronesia",),
+    "GBR": ("United Kingdom", "Great Britain", "UK"),
+    "IRN": ("Iran",),
+    "KOR": ("South Korea", "Republic of Korea"),
+    "LAO": ("Laos",),
+    "MAC": ("Macau",),
+    "MDA": ("Moldova",),
+    "MKD": ("Macedonia", "North Macedonia"),
+    "MMR": ("Burma", "Myanmar"),
+    "PRK": ("North Korea",),
+    "RUS": ("Russia",),
+    "SRB": ("Serbia",),
+    "SWZ": ("Swaziland",),
+    "SYR": ("Syria",),
+    "TJK": ("Tadjikistan",),
+    "TLS": ("East Timor",),
+    "TTO": ("Trinidad & Tobago", "Trinidad and Tobago"),
+    "TWN": ("Taiwan",),
+    "TZA": ("Tanzania",),
+    "UKR": ("Ukraine",),
+    "USA": ("United States", "USA", "United States of America"),
+    "VEN": ("Venezuela",),
+    "VNM": ("Vietnam",),
+    "XKX": ("Kosovo",),
+}
+
+
+def _normalize_country_name(name: str) -> str:
+    normalized = unicodedata.normalize("NFKD", name)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = normalized.replace("’", "'")
+    normalized = normalized.lower()
+    normalized = re.sub(r"[^a-z0-9]+", "", normalized)
+    return normalized
+
+
+def _generate_country_name_variants(name: str) -> Set[str]:
+    variants: Set[str] = set()
+    stripped = name.strip()
+    if not stripped:
+        return variants
+    variants.add(stripped)
+    variants.add(stripped.replace("’", "'"))
+
+    if "(" in stripped and ")" in stripped:
+        without_parens = re.sub(r"\s*\(.*?\)", "", stripped).strip()
+        if without_parens:
+            variants.add(without_parens)
+
+    if "," in stripped:
+        parts = [part.strip() for part in stripped.split(",") if part.strip()]
+        if len(parts) == 2:
+            variants.add(" ".join(reversed(parts)))
+        variants.update(parts)
+
+    if " and " in stripped.lower():
+        variants.add(stripped.replace(" and ", " & "))
+
+    variants.add(stripped.upper())
+
+    return {variant for variant in variants if variant}
+
+
+COUNTRY_CODE_TO_INFO: Dict[str, Tuple[str, str]] = {}
+COUNTRY_NAME_TO_CODE: Dict[str, str] = {}
+
+for line in COUNTRY_CODE_DATA.strip().splitlines():
+    iso3, iso2, name = [part.strip() for part in line.split(",", 2)]
+    iso3 = iso3.upper()
+    iso2 = iso2.upper()
+    COUNTRY_CODE_TO_INFO[iso3] = (name, iso2)
+
+    variants = _generate_country_name_variants(name)
+    variants.update(ADDITIONAL_COUNTRY_ALIASES.get(iso3, ()))
+    variants.add(iso3)
+    variants.add(iso2)
+
+    for variant in variants:
+        normalized = _normalize_country_name(variant)
+        if normalized and normalized not in COUNTRY_NAME_TO_CODE:
+            COUNTRY_NAME_TO_CODE[normalized] = iso3
+
+
+def lookup_country_code(name: str) -> Optional[str]:
+    normalized = _normalize_country_name(name)
+    if not normalized:
+        return None
+    return COUNTRY_NAME_TO_CODE.get(normalized)
+
+
+def get_country_display_name(code: str) -> Optional[str]:
+    info = COUNTRY_CODE_TO_INFO.get(code.upper())
+    if not info:
+        return None
+    return info[0]
+
+
+def country_code_to_flag(code: str) -> str:
+    info = COUNTRY_CODE_TO_INFO.get(code.upper())
+    if not info:
+        return ""
+    iso2 = info[1]
+    if len(iso2) != 2 or not iso2.isalpha():
+        return ""
+    try:
+        return "".join(chr(0x1F1E6 + ord(char.upper()) - ord("A")) for char in iso2)
+    except ValueError:
+        return ""
+
+
+def _extract_match_number_from_text(text: str) -> Optional[int]:
+    match = RANKING_MATCH_NUMBER_PATTERN.search(text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+@dataclass
+class VideoEntry:
+    team_name: str
+    normalized_name: str
+    value: Optional[float]
+    video_id: Optional[str]
+    time: Optional[str]
+    row_index: int
+
+
+@dataclass
+class VideoDataset:
+    entries: List[VideoEntry]
+    by_code: Dict[str, VideoEntry]
+    by_normalized_name: Dict[str, VideoEntry]
+
+
+@dataclass
+class PlaceholderSlot:
+    sheet_title: str
+    row_index: int
+    task_column: int
+    match_number: int
+    placeholder_index: int
+
 
 
 def _get_widget_background(widget: tk.Misc, fallback: tk.Misc) -> str:
@@ -184,13 +601,6 @@ def create_main_window() -> tk.Tk:
     notebook.add(config_frame, text="Config")
     notebook.add(tools_frame, text="Tools")
 
-    placeholder_videos_label = ttk.Label(
-        team_videos_frame,
-        text="Team Videos content will go here.",
-        anchor="center",
-    )
-    placeholder_videos_label.grid(padx=12, pady=12)
-
     console = ApplicationConsole(root)
     root.rowconfigure(2, weight=0)
     console.render(row=2)
@@ -199,6 +609,13 @@ def create_main_window() -> tk.Tk:
         ros_document_loader,
         match_schedule_importer,
     ) = build_config_tab(config_frame, console)
+    build_team_videos_tab(
+        team_videos_frame,
+        console,
+        credentials_manager,
+        ros_document_loader,
+        match_schedule_importer,
+    )
     build_tools_tab(
         tools_frame,
         console,
@@ -208,6 +625,38 @@ def create_main_window() -> tk.Tk:
     )
 
     return root
+
+
+def build_team_videos_tab(
+    parent: ttk.Frame,
+    console: ApplicationConsole,
+    credentials_manager: "GoogleDriveCredentialsManager",
+    ros_document_loader: "ROSDocumentLoaderUI",
+    match_schedule_importer: "MatchScheduleImporterUI",
+) -> None:
+    """Populate the Team Videos tab with optimization tooling."""
+
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(0, weight=1)
+
+    container = ttk.Frame(parent, padding=(12, 12, 12, 12))
+    container.grid(row=0, column=0, sticky="nsew")
+    container.columnconfigure(1, weight=1)
+
+    ttk.Label(
+        container,
+        text="Optimize Team Videos",
+        font=("Helvetica", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+    optimizer = OptimizeTeamVideosUI(
+        container,
+        credentials_manager,
+        ros_document_loader,
+        match_schedule_importer,
+        console,
+    )
+    optimizer.render(row=1)
 
 
 def build_config_tab(
@@ -555,6 +1004,19 @@ class MatchScheduleImporterUI:
             (date, list(matches))
             for date, matches in sorted(self._matches_by_date.items())
         ]
+
+    def get_matches_for_selected_field(self) -> List[Dict[str, Any]]:
+        field_number = self._imported_field
+        if field_number is None:
+            return []
+        selected: List[Dict[str, Any]] = []
+        for match in self._matches:
+            if not isinstance(match, dict):
+                continue
+            if match.get("field") != field_number:
+                continue
+            selected.append(dict(match))
+        return selected
 
     def extract_match_number(self, match: Dict[str, Any]) -> Optional[int]:
         for key in (
@@ -1694,6 +2156,190 @@ class MatchNumberGeneratorUI:
         for message in diagnostics:
             self.console.log(f"[Match Number Generator] {message}")
 
+
+class OptimizeTeamVideosUI:
+    """User interface wrapper for the team video optimization tool."""
+
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        credentials_manager: "GoogleDriveCredentialsManager",
+        document_loader: "ROSDocumentLoaderUI",
+        match_schedule_importer: MatchScheduleImporterUI,
+        console: ApplicationConsole,
+    ) -> None:
+        self.parent = parent
+        self.credentials_manager = credentials_manager
+        self.document_loader = document_loader
+        self.match_schedule_importer = match_schedule_importer
+        self.console = console
+        self.current_document_var = tk.StringVar()
+        self._status_var = tk.StringVar()
+        self._default_status = (
+            "Load a ROS document, match schedule, and Google credentials to begin."
+        )
+
+        self.document_loader.add_listener(self._on_document_url_changed)
+        self.document_loader.add_name_listener(self._on_document_name_changed)
+        self._on_document_url_changed(self.document_loader.get_document_url())
+        self._on_document_name_changed(self.document_loader.get_document_name())
+
+    def render(self, row: int) -> None:
+        ttk.Label(self.parent, text="Current ROS Document:").grid(
+            row=row, column=0, sticky="w", pady=(8, 0)
+        )
+
+        document_display = ttk.Entry(
+            self.parent,
+            textvariable=self.current_document_var,
+            state="readonly",
+        )
+        document_display.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        generate_button = ttk.Button(
+            self.parent,
+            text="Optimize Team Videos",
+            command=self.optimize_team_videos,
+        )
+        generate_button.grid(row=row + 1, column=1, sticky="e", pady=8)
+
+        status_label = ttk.Label(
+            self.parent,
+            textvariable=self._status_var,
+            wraplength=520,
+            justify="left",
+        )
+        status_label.grid(row=row + 2, column=0, columnspan=2, sticky="w")
+
+        self.set_status(self._default_status, log=False)
+
+    def _on_document_url_changed(self, url: str) -> None:
+        if not url:
+            self.set_status(
+                "Save a ROS document URL before optimizing team videos.", log=False
+            )
+
+    def _on_document_name_changed(self, name: str) -> None:
+        display_value = name if name else "Not set"
+        self.current_document_var.set(display_value)
+
+    def optimize_team_videos(self) -> None:
+        document_url = self.document_loader.get_document_url()
+        if not document_url:
+            self.set_status("Save a ROS document URL before optimizing team videos.")
+            return
+
+        if not self.match_schedule_importer.has_loaded_schedule():
+            messagebox.showerror(
+                "Match Schedule Required",
+                "Import a match schedule JSON before optimizing team videos.",
+                parent=self.parent.winfo_toplevel(),
+            )
+            self.set_status("Import a match schedule JSON before optimizing team videos.")
+            return
+
+        matches = self.match_schedule_importer.get_matches_for_selected_field()
+        if not matches:
+            messagebox.showerror(
+                "Match Schedule Missing Matches",
+                "The imported schedule does not include matches for the selected field.",
+                parent=self.parent.winfo_toplevel(),
+            )
+            self.set_status(
+                "The imported schedule does not include matches for the selected field."
+            )
+            return
+
+        credentials, error = self.credentials_manager.get_valid_credentials()
+        if credentials is None:
+            if error:
+                self.set_status(error)
+            else:
+                self.set_status(
+                    "Load Google Drive credentials before running this tool."
+                )
+            return
+
+        if build is None:
+            self.set_status(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+            return
+
+        spreadsheet_id = extract_spreadsheet_id(document_url)
+        if not spreadsheet_id:
+            self.set_status(
+                "Unable to determine spreadsheet ID from the saved document URL."
+            )
+            return
+
+        self.set_status("Contacting Google Sheets API...")
+
+        def _worker() -> None:
+            try:
+                report, diagnostics, spreadsheet_title = optimize_team_videos_for_sheet(
+                    credentials,
+                    spreadsheet_id,
+                    matches,
+                    self.match_schedule_importer,
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to update spreadsheet: {exc}"
+                self.parent.after(0, lambda: self.set_status(message))
+                return
+
+            self.parent.after(
+                0,
+                lambda: self._handle_optimize_success(
+                    report, diagnostics, spreadsheet_title
+                ),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def set_status(self, message: str, *, log: bool = True) -> None:
+        self._status_var.set(message)
+        if log:
+            self.console.log(f"[Optimize Team Videos] {message}")
+
+    def _handle_optimize_success(
+        self,
+        report: Dict[str, List[str]],
+        diagnostics: Sequence[str],
+        spreadsheet_title: str,
+    ) -> None:
+        if spreadsheet_title:
+            self.document_loader.set_document_name(spreadsheet_title)
+
+        if diagnostics:
+            self._log_diagnostics(diagnostics)
+
+        console_message = format_report(
+            report,
+            (),
+            success_header="Team video assignments applied:",
+            empty_message="No TEAM VIDEO PLACEHOLDER entries were updated.",
+        )
+
+        if report:
+            total_updates = sum(len(entries) for entries in report.values())
+            sheet_count = len(report)
+            sheet_word = "sheet" if sheet_count == 1 else "sheets"
+            status_message = (
+                "Updated "
+                f"{total_updates} placeholder{'s' if total_updates != 1 else ''} across "
+                f"{sheet_count} {sheet_word}."
+            )
+        else:
+            status_message = "No TEAM VIDEO PLACEHOLDER entries were updated."
+
+        self.console.log(f"[Optimize Team Videos] {console_message}")
+        self.set_status(status_message, log=False)
+
+    def _log_diagnostics(self, diagnostics: Sequence[str]) -> None:
+        for message in diagnostics:
+            self.console.log(f"[Optimize Team Videos] {message}")
+
 def extract_spreadsheet_id(url: str) -> str:
     """Extract the spreadsheet ID from a Google Sheets URL."""
 
@@ -1808,6 +2454,632 @@ def _fetch_spreadsheet(
             raise
 
     return spreadsheet, theme_supported, service
+
+
+def _collect_sheet_rows(sheet_data: Sequence[dict]) -> List[Tuple[int, Dict[int, dict]]]:
+    rows: Dict[int, Dict[int, dict]] = {}
+    for grid_data in sheet_data:
+        if not isinstance(grid_data, dict):
+            continue
+        start_row = grid_data.get("startRow", 0)
+        start_column = grid_data.get("startColumn", 0)
+        row_data = grid_data.get("rowData", [])
+        for row_offset, row in enumerate(row_data or []):
+            if not isinstance(row, dict):
+                continue
+            row_index = start_row + row_offset
+            row_cells = rows.setdefault(row_index, {})
+            values = row.get("values", [])
+            for column_offset, cell in enumerate(values or []):
+                column_index = start_column + column_offset
+                if isinstance(cell, dict):
+                    row_cells[column_index] = cell
+    return sorted(rows.items())
+
+
+def extract_video_dataset_from_spreadsheet(
+    spreadsheet: Mapping[str, Any]
+) -> Tuple[VideoDataset, List[str]]:
+    dataset = VideoDataset(entries=[], by_code={}, by_normalized_name={})
+    diagnostics: List[str] = []
+
+    videos_sheet: Optional[Mapping[str, Any]] = None
+    for sheet in spreadsheet.get("sheets", []):
+        properties = sheet.get("properties", {}) if isinstance(sheet, Mapping) else {}
+        title = str(properties.get("title", ""))
+        if title.lower() == "videos":
+            videos_sheet = sheet
+            break
+
+    if videos_sheet is None:
+        diagnostics.append("No sheet named 'Videos' was found in the spreadsheet.")
+        return dataset, diagnostics
+
+    sheet_data = videos_sheet.get("data", []) if isinstance(videos_sheet, Mapping) else []
+    if not sheet_data:
+        diagnostics.append("Videos sheet does not contain any data.")
+        return dataset, diagnostics
+
+    rows = _collect_sheet_rows(sheet_data)
+    header_row_index: Optional[int] = None
+    header_map: Dict[str, int] = {}
+    header_aliases: Dict[str, Set[str]] = {
+        "team": {"team"},
+        "value": {"value", "score"},
+        "video_id": {"video id", "id", "video"},
+        "time": {"time", "start time", "scheduled"},
+    }
+
+    for row_index, columns in rows:
+        detected: Dict[str, int] = {}
+        for column_index, cell in columns.items():
+            text = _extract_cell_text(cell)
+            if not text:
+                continue
+            normalized = text.strip().lower()
+            for key, aliases in header_aliases.items():
+                if normalized in aliases:
+                    detected[key] = column_index
+        if "team" in detected and "value" in detected:
+            header_map = detected
+            header_row_index = row_index
+            break
+
+    if header_row_index is None:
+        diagnostics.append("Videos sheet is missing 'Team' and 'Value' headers.")
+        return dataset, diagnostics
+
+    team_column = header_map["team"]
+    value_column = header_map["value"]
+    video_id_column = header_map.get("video_id")
+    time_column = header_map.get("time")
+
+    processed_rows = 0
+
+    for row_index, columns in rows:
+        if row_index <= header_row_index:
+            continue
+        team_cell = columns.get(team_column)
+        if not team_cell:
+            continue
+        team_text = _extract_cell_text(team_cell).strip()
+        if not team_text:
+            continue
+
+        cleaned_team = strip_leading_flag_emoji(team_text)
+        normalized_name = _normalize_country_name(cleaned_team)
+
+        value_cell = columns.get(value_column)
+        value = _extract_numeric_cell_value(value_cell or {}) if value_cell else None
+        if value is None and value_cell is not None:
+            fallback_text = _extract_cell_text(value_cell).strip()
+            if fallback_text:
+                try:
+                    value = float(fallback_text.replace(",", ""))
+                except ValueError:
+                    pass
+
+        video_id: Optional[str] = None
+        if video_id_column is not None:
+            video_cell = columns.get(video_id_column)
+            if video_cell is not None:
+                candidate = _extract_cell_text(video_cell).strip()
+                if candidate:
+                    video_id = candidate
+
+        time_value: Optional[str] = None
+        if time_column is not None:
+            time_cell = columns.get(time_column)
+            if time_cell is not None:
+                candidate = _extract_cell_text(time_cell).strip()
+                if candidate:
+                    time_value = candidate
+
+        entry = VideoEntry(
+            team_name=cleaned_team if cleaned_team else team_text,
+            normalized_name=normalized_name,
+            value=value,
+            video_id=video_id,
+            time=time_value,
+            row_index=row_index,
+        )
+        dataset.entries.append(entry)
+        processed_rows += 1
+
+        if normalized_name and normalized_name not in dataset.by_normalized_name:
+            dataset.by_normalized_name[normalized_name] = entry
+
+        iso_candidate: Optional[str] = None
+        paren_match = re.search(r"\(([A-Z]{3})\)", team_text)
+        if paren_match:
+            candidate = paren_match.group(1).upper()
+            if candidate in COUNTRY_CODE_TO_INFO:
+                iso_candidate = candidate
+        if iso_candidate is None:
+            iso_candidate = lookup_country_code(cleaned_team)
+        if iso_candidate and iso_candidate not in dataset.by_code:
+            dataset.by_code[iso_candidate] = entry
+
+    diagnostics.append(
+        f"Videos sheet: processed {processed_rows} row{'s' if processed_rows != 1 else ''}."
+    )
+    return dataset, diagnostics
+
+
+def collect_team_video_slots(
+    spreadsheet: Mapping[str, Any]
+) -> Tuple[List[PlaceholderSlot], List[str]]:
+    slots: List[PlaceholderSlot] = []
+    diagnostics: List[str] = []
+
+    for sheet in spreadsheet.get("sheets", []):
+        if not isinstance(sheet, Mapping):
+            continue
+        properties = sheet.get("properties", {})
+        title = str(properties.get("title", "Untitled"))
+        sheet_data = sheet.get("data", [])
+        if not sheet_data:
+            continue
+
+        task_column = find_task_column(sheet_data)
+        if task_column is None:
+            continue
+
+        pending: List[Tuple[int, str]] = []
+        for row_index, columns in _collect_sheet_rows(sheet_data):
+            cell = columns.get(task_column)
+            if not cell:
+                continue
+            text = _extract_cell_text(cell)
+            if not text:
+                continue
+            normalized = text.strip()
+            upper = normalized.upper()
+            if normalized.upper().startswith("TEAM VIDEO PLACEHOLDER"):
+                pending.append((row_index, normalized))
+                continue
+
+            if upper.startswith("RANKING MATCH"):
+                match_number = _extract_match_number_from_text(normalized)
+                if match_number is None:
+                    diagnostics.append(
+                        f"{title}: Unable to extract match number from cell value {normalized!r}."
+                    )
+                    pending.clear()
+                    continue
+
+                if not pending:
+                    continue
+
+                for placeholder_index, (placeholder_row, _placeholder_text) in enumerate(
+                    pending
+                ):
+                    slots.append(
+                        PlaceholderSlot(
+                            sheet_title=title,
+                            row_index=placeholder_row,
+                            task_column=task_column,
+                            match_number=match_number,
+                            placeholder_index=placeholder_index,
+                        )
+                    )
+                pending.clear()
+
+        if pending:
+            diagnostics.append(
+                f"{title}: {len(pending)} TEAM VIDEO PLACEHOLDER row(s) without a following RANKING MATCH were ignored."
+            )
+
+    slots.sort(key=lambda slot: (slot.sheet_title, slot.row_index, slot.placeholder_index))
+    return slots, diagnostics
+
+
+def _extract_countries_from_match(match: Mapping[str, Any]) -> List[str]:
+    codes: Set[str] = set()
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, str):
+            candidate = value.strip().upper()
+            if re.fullmatch(r"[A-Z]{3}", candidate) and candidate in COUNTRY_CODE_TO_INFO:
+                codes.add(candidate)
+            return
+        if isinstance(value, Mapping):
+            for key in (
+                "country",
+                "countryCode",
+                "country_code",
+                "countrycode",
+                "teamCountry",
+            ):
+                if key in value:
+                    visit(value[key], depth + 1)
+            for sub_value in value.values():
+                if isinstance(sub_value, (list, tuple, set, dict)):
+                    visit(sub_value, depth + 1)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item, depth + 1)
+
+    for key in (
+        "countries",
+        "countryCodes",
+        "teams",
+        "participants",
+        "alliances",
+        "blueAllianceTeams",
+        "redAllianceTeams",
+    ):
+        if key in match:
+            visit(match[key])
+
+    if not codes:
+        for value in match.values():
+            if isinstance(value, (list, tuple, set)):
+                visit(value)
+            elif isinstance(value, Mapping):
+                visit(value)
+
+    return sorted(codes)
+
+
+def build_match_country_map(
+    matches: Sequence[Mapping[str, Any]],
+    importer: MatchScheduleImporterUI,
+) -> Tuple[Dict[int, List[str]], List[str]]:
+    mapping: Dict[int, List[str]] = {}
+    diagnostics: List[str] = []
+
+    for match in matches:
+        if not isinstance(match, Mapping):
+            continue
+        match_number = importer.extract_match_number(dict(match))
+        if match_number is None:
+            details = importer.describe_match(dict(match))
+            diagnostics.append(
+                f"Schedule entry missing match number. Details: {details}."
+            )
+            continue
+
+        countries = _extract_countries_from_match(match)
+        if not countries:
+            details = importer.describe_match(dict(match))
+            diagnostics.append(
+                f"No country entries found for match #{match_number}. Details: {details}."
+            )
+            continue
+        mapping[match_number] = countries
+
+    return mapping, diagnostics
+
+
+def find_video_entry_for_code(code: str, dataset: VideoDataset) -> Optional[VideoEntry]:
+    code = code.upper()
+    entry = dataset.by_code.get(code)
+    if entry is not None:
+        return entry
+
+    candidate_names: List[str] = []
+    display_name = get_country_display_name(code)
+    if display_name:
+        candidate_names.append(display_name)
+    candidate_names.extend(ADDITIONAL_COUNTRY_ALIASES.get(code, ()))
+
+    for name in candidate_names:
+        normalized = _normalize_country_name(strip_leading_flag_emoji(name))
+        if not normalized:
+            continue
+        entry = dataset.by_normalized_name.get(normalized)
+        if entry is not None:
+            return entry
+
+    for entry in dataset.entries:
+        team_upper = entry.team_name.upper()
+        if re.search(rf"\b{code}\b", team_upper):
+            return entry
+
+    return None
+
+
+def _hungarian_algorithm(cost_matrix: Sequence[Sequence[float]]) -> List[int]:
+    rows = len(cost_matrix)
+    if rows == 0:
+        return []
+    cols = len(cost_matrix[0]) if cost_matrix else 0
+    if cols < rows:
+        raise ValueError("Cost matrix must have at least as many columns as rows.")
+
+    u = [0.0] * (rows + 1)
+    v = [0.0] * (cols + 1)
+    p = [0] * (cols + 1)
+    way = [0] * (cols + 1)
+
+    for i in range(1, rows + 1):
+        p[0] = i
+        minv = [math.inf] * (cols + 1)
+        used = [False] * (cols + 1)
+        j0 = 0
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = math.inf
+            j1 = 0
+            for j in range(1, cols + 1):
+                if used[j]:
+                    continue
+                cur = cost_matrix[i0 - 1][j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]
+                    j1 = j
+            if delta is math.inf:
+                break
+            for j in range(cols + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+
+    assignment = [-1] * rows
+    for j in range(1, cols + 1):
+        if p[j] != 0:
+            assignment[p[j] - 1] = j - 1
+    return assignment
+
+
+def compute_team_video_assignments(
+    slots: Sequence[PlaceholderSlot],
+    match_countries: Mapping[int, Sequence[str]],
+    dataset: VideoDataset,
+) -> Tuple[List[PlaceholderAssignment], List[str]]:
+    diagnostics: List[str] = []
+    slot_candidates: List[Tuple[PlaceholderSlot, List[str]]] = []
+
+    for slot in slots:
+        countries = match_countries.get(slot.match_number, [])
+        if not countries:
+            diagnostics.append(
+                f"Match #{slot.match_number} on sheet {slot.sheet_title} is missing country data in the imported schedule."
+            )
+            continue
+
+        valid_codes: List[str] = []
+        missing_entries: List[str] = []
+        for code in countries:
+            entry = find_video_entry_for_code(code, dataset)
+            if entry is None:
+                missing_entries.append(code)
+            else:
+                valid_codes.append(code)
+
+        if missing_entries:
+            diagnostics.append(
+                f"No videos found for countries {', '.join(sorted(missing_entries))} in match #{slot.match_number}."
+            )
+
+        if not valid_codes:
+            diagnostics.append(
+                f"Match #{slot.match_number} on sheet {slot.sheet_title} has no assignable countries with videos."
+            )
+            continue
+
+        slot_candidates.append((slot, valid_codes))
+
+    if not slot_candidates:
+        return [], diagnostics
+
+    unique_codes = sorted({code for _, codes in slot_candidates for code in codes})
+    if len(unique_codes) < len(slot_candidates):
+        diagnostics.append(
+            "Fewer unique country videos are available than placeholders; some placeholders may remain unassigned."
+        )
+
+    inf_cost = 1e12
+    missing_value_penalty = 1e6
+    cost_matrix: List[List[float]] = []
+
+    for slot, codes in slot_candidates:
+        row: List[float] = []
+        for code in unique_codes:
+            if code in codes:
+                entry = find_video_entry_for_code(code, dataset)
+                if entry is None:
+                    row.append(inf_cost)
+                    continue
+                value = entry.value if entry.value is not None else missing_value_penalty
+                cost = float(value) + slot.placeholder_index * 1e-6
+                row.append(cost)
+            else:
+                row.append(inf_cost)
+        cost_matrix.append(row)
+
+    if not cost_matrix or not cost_matrix[0]:
+        return [], diagnostics
+
+    try:
+        assignments = _hungarian_algorithm(cost_matrix)
+    except ValueError:
+        diagnostics.append(
+            "Unable to compute assignments because there are fewer available countries than placeholders."
+        )
+        return [], diagnostics
+
+    results: List[PlaceholderAssignment] = []
+    assigned_codes: Set[str] = set()
+    for row_index, (slot, _codes) in enumerate(slot_candidates):
+        column_index = assignments[row_index] if row_index < len(assignments) else -1
+        if column_index < 0 or column_index >= len(unique_codes):
+            diagnostics.append(
+                f"No available country could be assigned to placeholder before match #{slot.match_number} on sheet {slot.sheet_title}."
+            )
+            continue
+        cost = cost_matrix[row_index][column_index]
+        if cost >= inf_cost:
+            diagnostics.append(
+                f"No valid assignment found for placeholder before match #{slot.match_number} on sheet {slot.sheet_title}."
+            )
+            continue
+        code = unique_codes[column_index]
+        if code in assigned_codes:
+            continue
+        entry = find_video_entry_for_code(code, dataset)
+        if entry is None:
+            continue
+        assigned_codes.add(code)
+        results.append(
+            PlaceholderAssignment(
+                slot=slot,
+                country_code=code,
+                video=entry,
+            )
+        )
+
+    return results, diagnostics
+
+
+def apply_team_video_updates(
+    credentials: Credentials,
+    spreadsheet_id: str,
+    assignments: Sequence[PlaceholderAssignment],
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    updates: Dict[str, List[str]] = {}
+    data_updates: List[Dict[str, Any]] = []
+
+    for assignment in assignments:
+        slot = assignment.slot
+        entry = assignment.video
+        code = assignment.country_code
+        flag = country_code_to_flag(code)
+        display_name = strip_leading_flag_emoji(entry.team_name)
+        if flag:
+            new_text = f"{flag} {display_name}".strip()
+        else:
+            new_text = display_name
+
+        row_number = slot.row_index + 1
+        task_cell = column_index_to_letter(slot.task_column) + str(row_number)
+        sheet_title = slot.sheet_title
+        updates.setdefault(sheet_title, []).append(f"{task_cell}: {new_text}")
+        data_updates.append(
+            {
+                "range": single_cell_range(sheet_title, task_cell),
+                "values": [[new_text]],
+            }
+        )
+
+        if entry.time:
+            time_cell = column_index_to_letter(1) + str(row_number)
+            updates[sheet_title].append(f"{time_cell}: Time {entry.time}")
+            data_updates.append(
+                {
+                    "range": single_cell_range(sheet_title, time_cell),
+                    "values": [[entry.time]],
+                }
+            )
+
+        if entry.video_id:
+            video_cell = column_index_to_letter(2) + str(row_number)
+            updates[sheet_title].append(f"{video_cell}: Video ID {entry.video_id}")
+            data_updates.append(
+                {
+                    "range": single_cell_range(sheet_title, video_cell),
+                    "values": [[entry.video_id]],
+                }
+            )
+
+    if data_updates:
+        if build is None:
+            raise ModuleNotFoundError(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+        service = build("sheets", "v4", credentials=credentials)
+        values_resource = service.spreadsheets().values()
+        batch_update_kwargs = {
+            "spreadsheetId": spreadsheet_id,
+            "body": {
+                "valueInputOption": "USER_ENTERED",
+                "data": data_updates,
+            },
+        }
+        if _method_supports_parameter(values_resource.batchUpdate, "supportsAllDrives"):
+            batch_update_kwargs["supportsAllDrives"] = True
+        values_resource.batchUpdate(**batch_update_kwargs).execute()
+
+    formatted = {
+        sheet: list(entries)
+        for sheet, entries in sorted(updates.items())
+    }
+
+    return formatted, []
+
+
+def optimize_team_videos_for_sheet(
+    credentials: Credentials,
+    spreadsheet_id: str,
+    matches: Sequence[Mapping[str, Any]],
+    importer: MatchScheduleImporterUI,
+) -> Tuple[Dict[str, List[str]], List[str], str]:
+    spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
+        credentials, spreadsheet_id
+    )
+    spreadsheet_title = str(
+        spreadsheet.get("properties", {}).get("title", "")
+    )
+
+    diagnostics: List[str] = []
+
+    video_dataset, video_diagnostics = extract_video_dataset_from_spreadsheet(spreadsheet)
+    diagnostics.extend(video_diagnostics)
+
+    if not video_dataset.entries:
+        diagnostics.append("No video entries were found on the Videos sheet.")
+        return {}, diagnostics, spreadsheet_title
+
+    slots, slot_diagnostics = collect_team_video_slots(spreadsheet)
+    diagnostics.extend(slot_diagnostics)
+
+    if not slots:
+        diagnostics.append("No TEAM VIDEO PLACEHOLDER entries were found.")
+        return {}, diagnostics, spreadsheet_title
+
+    match_countries, schedule_diagnostics = build_match_country_map(matches, importer)
+    diagnostics.extend(schedule_diagnostics)
+
+    if not match_countries:
+        diagnostics.append("The imported match schedule did not include country assignments.")
+        return {}, diagnostics, spreadsheet_title
+
+    assignments, assignment_diagnostics = compute_team_video_assignments(
+        slots, match_countries, video_dataset
+    )
+    diagnostics.extend(assignment_diagnostics)
+
+    if not assignments:
+        diagnostics.append(
+            "Unable to assign videos to any placeholders with the available data."
+        )
+        return {}, diagnostics, spreadsheet_title
+
+    report, update_diagnostics = apply_team_video_updates(
+        credentials, spreadsheet_id, assignments
+    )
+    diagnostics.extend(update_diagnostics)
+
+    return report, diagnostics, spreadsheet_title
 
 
 def generate_placeholders_for_sheet(
