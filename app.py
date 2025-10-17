@@ -2708,8 +2708,11 @@ def collect_team_video_slots(
     return slots, diagnostics
 
 
-def _extract_countries_from_match(match: Mapping[str, Any]) -> List[str]:
-    codes: Set[str] = set()
+def _extract_countries_from_match(match: Mapping[str, Any]) -> Tuple[List[str], List[str]]:
+    raw_values: List[str] = []
+    raw_seen: Set[str] = set()
+    codes_seen: Set[str] = set()
+    codes_ordered: List[str] = []
 
     def visit(value: Any, depth: int = 0) -> None:
         if depth > 6:
@@ -2717,7 +2720,13 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> List[str]:
         if isinstance(value, str):
             iso3_candidate = normalize_country_code(value)
             if iso3_candidate:
-                codes.add(iso3_candidate)
+                stripped = value.strip()
+                if stripped and stripped not in raw_seen:
+                    raw_seen.add(stripped)
+                    raw_values.append(stripped)
+                if iso3_candidate not in codes_seen:
+                    codes_seen.add(iso3_candidate)
+                    codes_ordered.append(iso3_candidate)
             return
         if isinstance(value, Mapping):
             for key in (
@@ -2749,14 +2758,13 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> List[str]:
         if key in match:
             visit(match[key])
 
-    if not codes:
+    if not codes_ordered:
         for value in match.values():
             if isinstance(value, (list, tuple, set)):
                 visit(value)
             elif isinstance(value, Mapping):
                 visit(value)
-
-    return sorted(codes)
+    return raw_values, codes_ordered
 
 
 def build_match_country_map(
@@ -2777,7 +2785,32 @@ def build_match_country_map(
             )
             continue
 
-        countries = _extract_countries_from_match(match)
+        raw_values, countries = _extract_countries_from_match(match)
+        console = getattr(importer, "console", None)
+        if console is not None:
+            prefix = "[Match Schedule Importer]"
+            raw_formatted = (
+                "[]" if not raw_values else f"[{', '.join(raw_values)}]"
+            )
+            normalized_formatted = (
+                "[]" if not countries else f"[{', '.join(countries)}]"
+            )
+            display_names: List[str] = []
+            for code in countries:
+                display = get_country_display_name(code)
+                display_names.append(display if display else f"(unrecognized {code})")
+            display_formatted = (
+                "[]" if not display_names else f"[{', '.join(display_names)}]"
+            )
+            console.log(
+                f"{prefix} Match #{match_number}: raw country values -> {raw_formatted}"
+            )
+            console.log(
+                f"{prefix} Match #{match_number}: normalized country codes -> {normalized_formatted}"
+            )
+            console.log(
+                f"{prefix} Match #{match_number}: display country names -> {display_formatted}"
+            )
         if not countries:
             details = importer.describe_match(dict(match))
             diagnostics.append(
