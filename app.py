@@ -1047,12 +1047,17 @@ class MatchNumberGeneratorUI:
             success_header="Ranking match numbers applied:",
             empty_message="No RANKING MATCH cells were updated.",
         )
-        status_message = format_report(
-            report,
-            (),
-            success_header="",
-            empty_message="No RANKING MATCH cells were updated.",
-        )
+        if report:
+            total_updates = sum(len(entries) for entries in report.values())
+            sheet_count = len(report)
+            sheet_word = "sheet" if sheet_count == 1 else "sheets"
+            status_message = (
+                "Ranking match numbers applied to "
+                f"{total_updates} cell{'s' if total_updates != 1 else ''} across "
+                f"{sheet_count} {sheet_word}."
+            )
+        else:
+            status_message = "No RANKING MATCH cells were updated."
 
         self.console.log(f"[Match Number Generator] {console_message}")
         self.set_status(status_message, log=False)
