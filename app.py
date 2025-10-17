@@ -231,7 +231,9 @@ def build_config_tab(
         font=("Helvetica", 14, "bold"),
     ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-    ros_document_loader = ROSDocumentLoaderUI(ros_document_frame, console)
+    ros_document_loader = ROSDocumentLoaderUI(
+        ros_document_frame, console, credentials_manager=credentials_manager
+    )
     ros_document_loader.render(row=1)
 
     return credentials_manager, ros_document_loader
@@ -297,6 +299,7 @@ class GoogleDriveCredentialsManager:
         self._credentials: Optional[Credentials] = None
         self._user_poll_after_id: Optional[str] = None
         self._last_user_message: Optional[str] = None
+        self._credential_listeners: List[Callable[[Optional[Credentials]], None]] = []
 
     @property
     def credentials(self) -> Optional[Credentials]:
@@ -330,6 +333,7 @@ class GoogleDriveCredentialsManager:
             else:
                 self._credentials = credentials
                 self._persist_credentials(credentials)
+                self._notify_credentials_listeners()
 
         if not credentials.valid:
             message = "Stored credentials are invalid. Please re-authorize."
@@ -380,6 +384,22 @@ class GoogleDriveCredentialsManager:
         self._load_persisted_credentials()
         self._schedule_user_poll(0)
 
+    def add_credentials_listener(
+        self, callback: Callable[[Optional[Credentials]], None]
+    ) -> None:
+        self._credential_listeners.append(callback)
+        try:
+            callback(self._credentials)
+        except Exception:
+            pass
+
+    def _notify_credentials_listeners(self) -> None:
+        for listener in list(self._credential_listeners):
+            try:
+                listener(self._credentials)
+            except Exception:
+                continue
+
     def select_credentials_file(self) -> None:
         filename = filedialog.askopenfilename(
             parent=self.parent,
@@ -424,6 +444,7 @@ class GoogleDriveCredentialsManager:
                     message = "Authorization successful. Credentials are loaded in memory."
                 self.set_status(message)
                 self._schedule_user_poll(0)
+                self._notify_credentials_listeners()
 
             self.parent.after(0, _on_success)
 
@@ -467,6 +488,7 @@ class GoogleDriveCredentialsManager:
             self.set_status("Loaded saved credentials. You're ready to go.")
             self._persist_credentials(credentials)
             self._schedule_user_poll(0)
+            self._notify_credentials_listeners()
         else:
             self.set_status("Saved credentials are invalid. Please re-authorize.")
 
@@ -569,18 +591,30 @@ class ROSDocumentLoaderUI:
     STORAGE_PATH = Path.home() / ".fgc_team_filler" / "ros_document_url.txt"
 
     def __init__(
-        self, parent: ttk.Frame, console: ApplicationConsole
+        self,
+        parent: ttk.Frame,
+        console: ApplicationConsole,
+        *,
+        credentials_manager: Optional["GoogleDriveCredentialsManager"] = None,
     ) -> None:
         self.parent = parent
         self.console = console
+        self._credentials_manager = credentials_manager
         self.sheet_url_var = tk.StringVar(value=self._load_saved_url())
         self.document_name_var = tk.StringVar()
         self._status_var = tk.StringVar()
         self._listeners: List[Callable[[str], None]] = []
         self._name_listeners: List[Callable[[str], None]] = []
+        self._resolved_names: Dict[str, str] = {}
+        self._lookup_in_progress: Set[str] = set()
 
         self.sheet_url_var.trace_add("write", self._on_url_var_changed)
         self._update_document_name(self.sheet_url_var.get())
+
+        if self._credentials_manager is not None:
+            self._credentials_manager.add_credentials_listener(
+                self._on_credentials_changed
+            )
 
     def render(self, row: int) -> None:
         ttk.Label(self.parent, text="Google Sheets URL:").grid(
@@ -680,21 +714,35 @@ class ROSDocumentLoaderUI:
 
     def set_document_name(self, name: str) -> None:
         text = (name or "").strip()
+        if text:
+            spreadsheet_id = extract_spreadsheet_id(self.sheet_url_var.get().strip())
+            if spreadsheet_id:
+                self._resolved_names[spreadsheet_id] = text
         display = text if text else "Unknown"
         self._set_document_name_display(display)
 
     def _update_document_name(self, url: str) -> None:
+        url = (url or "").strip()
         if not url:
-            display = "Not set"
-        else:
-            name = derive_document_name(url)
-            if not name:
-                spreadsheet_id = extract_spreadsheet_id(url)
-                if spreadsheet_id:
-                    name = f"Spreadsheet {spreadsheet_id}"
-            display = name or "Unknown"
+            self._set_document_name_display("Not set")
+            return
+
+        spreadsheet_id = extract_spreadsheet_id(url)
+        if spreadsheet_id:
+            cached_name = self._resolved_names.get(spreadsheet_id)
+            if cached_name:
+                self._set_document_name_display(cached_name)
+                return
+
+        name = derive_document_name(url)
+        if not name:
+            if spreadsheet_id:
+                name = f"Spreadsheet {spreadsheet_id}"
+        display = name or "Unknown"
 
         self._set_document_name_display(display)
+        if spreadsheet_id:
+            self._maybe_lookup_remote_title(spreadsheet_id)
 
     def _set_document_name_display(self, display: str) -> None:
         self.document_name_var.set(display)
@@ -703,6 +751,81 @@ class ROSDocumentLoaderUI:
                 listener(display)
             except Exception:
                 continue
+
+    def _on_credentials_changed(self, credentials: Optional[Credentials]) -> None:
+        if credentials is None:
+            return
+        url = self.sheet_url_var.get().strip()
+        spreadsheet_id = extract_spreadsheet_id(url)
+        if spreadsheet_id:
+            self._maybe_lookup_remote_title(spreadsheet_id, credentials=credentials)
+
+    def _maybe_lookup_remote_title(
+        self,
+        spreadsheet_id: str,
+        *,
+        credentials: Optional[Credentials] = None,
+    ) -> None:
+        if not spreadsheet_id:
+            return
+        if spreadsheet_id in self._resolved_names:
+            return
+        if spreadsheet_id in self._lookup_in_progress:
+            return
+        if build is None:
+            return
+
+        manager = self._credentials_manager
+        if credentials is None:
+            if manager is None:
+                return
+            credentials, error = manager.get_valid_credentials(log_status=False)
+            if credentials is None:
+                if error:
+                    self.console.log(f"[ROS Document] {error}")
+                return
+        self._lookup_in_progress.add(spreadsheet_id)
+
+        def _worker() -> None:
+            try:
+                spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
+                    credentials, spreadsheet_id
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to fetch spreadsheet details: {exc}"[:500]
+                self.parent.after(
+                    0,
+                    lambda: self._finalize_remote_lookup(
+                        spreadsheet_id, None, error_message=message
+                    ),
+                )
+                return
+
+            title = str(spreadsheet.get("properties", {}).get("title", "")).strip()
+            self.parent.after(
+                0,
+                lambda: self._finalize_remote_lookup(spreadsheet_id, title or None),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finalize_remote_lookup(
+        self,
+        spreadsheet_id: str,
+        title: Optional[str],
+        *,
+        error_message: Optional[str] = None,
+    ) -> None:
+        self._lookup_in_progress.discard(spreadsheet_id)
+        if error_message:
+            self.console.log(f"[ROS Document] {error_message}")
+        if not title:
+            return
+
+        self._resolved_names[spreadsheet_id] = title
+        current_id = extract_spreadsheet_id(self.sheet_url_var.get().strip())
+        if current_id == spreadsheet_id:
+            self._set_document_name_display(title)
 
 
 class ROSPlaceholderGeneratorUI:
