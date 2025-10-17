@@ -2818,13 +2818,37 @@ def collect_team_video_slots(
         if task_column is None:
             continue
 
-        header_video_column: Optional[int] = task_column - 1 if task_column > 0 else None
-        header_duration_column: Optional[int] = (
-            task_column - 2 if task_column > 1 else None
-        )
+        rows = _collect_sheet_rows(sheet_data)
+
+        header_video_column: Optional[int] = None
+        header_duration_column: Optional[int] = None
+
+        for _row_index, columns in rows:
+            for column_index, cell in columns.items():
+                text = _extract_cell_text(cell)
+                if not text:
+                    continue
+                normalized = _normalize_header_alias(text, uppercase=True)
+                if (
+                    header_video_column is None
+                    and normalized in VIDEO_NUMBER_HEADER_ALIASES
+                ):
+                    header_video_column = column_index
+                if (
+                    header_duration_column is None
+                    and normalized in DURATION_HEADER_ALIASES
+                ):
+                    header_duration_column = column_index
+            if header_video_column is not None and header_duration_column is not None:
+                break
+
+        if header_video_column is None and task_column > 0:
+            header_video_column = task_column - 1
+        if header_duration_column is None and task_column > 1:
+            header_duration_column = task_column - 2
 
         pending: List[Tuple[int, str]] = []
-        for row_index, columns in _collect_sheet_rows(sheet_data):
+        for row_index, columns in rows:
             cell = columns.get(task_column)
             if not cell:
                 continue
