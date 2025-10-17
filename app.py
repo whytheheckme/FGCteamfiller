@@ -3302,7 +3302,9 @@ def apply_team_video_updates(
             }
         )
 
-        video_number_value = entry.video_number
+        # Temporary diagnostic override: always write a placeholder value so we can
+        # confirm the writer is targeting the expected cells in the schedule.
+        video_number_value = "XXX"
         video_number_column = slot.video_number_column
         if video_number_column is None and slot.task_column > 0:
             video_number_column = slot.task_column - 1
@@ -3326,7 +3328,9 @@ def apply_team_video_updates(
                 }
             )
 
-        duration_value = entry.duration or entry.time
+        # Write the placeholder value for duration as well so we can validate the
+        # update flow independently of data pulled from the Videos sheet.
+        duration_value = "XXX"
         duration_column = slot.duration_column
         if duration_column is None and slot.task_column > 1:
             duration_column = slot.task_column - 2
