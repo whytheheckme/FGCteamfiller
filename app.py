@@ -705,7 +705,10 @@ class ROSPlaceholderGeneratorUI:
     # and did not match the actual cell color (≈#C9DAF8), causing detection to
     # miss legitimately highlighted rows.
     COLOR_TARGET = (0.788, 0.855, 0.973)
-    COLOR_TOLERANCE = 0.002
+    # Allow small deviations when Google Sheets exports floating point values for
+    # the Light Cornflower Blue 3 placeholder color.  Values outside of this
+    # tolerance are considered a different shade entirely.
+    COLOR_TOLERANCE = 0.02
 
     def __init__(
         self,
@@ -1626,14 +1629,31 @@ def is_light_cornflower_blue(color: Dict[str, float]) -> bool:
 
     target = ROSPlaceholderGeneratorUI.COLOR_TARGET
     tolerance = ROSPlaceholderGeneratorUI.COLOR_TOLERANCE
-    red = float(color.get("red", 1.0))
-    green = float(color.get("green", 1.0))
-    blue = float(color.get("blue", 1.0))
-    return (
-        math.isclose(red, target[0], abs_tol=tolerance)
-        and math.isclose(green, target[1], abs_tol=tolerance)
-        and math.isclose(blue, target[2], abs_tol=tolerance)
+
+    def _channel(name: str) -> float:
+        value = color.get(name, 1.0)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 1.0
+
+    red = _channel("red")
+    green = _channel("green")
+    blue = _channel("blue")
+
+    # The placeholder colour is distinctly blue.  Reject obvious false positives
+    # before performing the more expensive distance calculation.
+    if red > green + tolerance:
+        return False
+    if green > blue + tolerance:
+        return False
+
+    distance = math.sqrt(
+        (red - target[0]) ** 2
+        + (green - target[1]) ** 2
+        + (blue - target[2]) ** 2
     )
+    return distance <= tolerance
 
 
 def placeholder_code_iter(prefix: str) -> Iterable[str]:
