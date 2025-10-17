@@ -603,6 +603,9 @@ class VideoEntry:
     row_index: int
     video_number: Optional[str]
     duration: Optional[str]
+    team_cell_text: Optional[str] = None
+    video_number_cell_text: Optional[str] = None
+    duration_cell_text: Optional[str] = None
 
 
 @dataclass
@@ -614,6 +617,7 @@ class VideoDataset:
     video_number_column: Optional[int] = None
     duration_column: Optional[int] = None
     match_column: Optional[int] = None
+    team_column: Optional[int] = None
 
 
 @dataclass
@@ -2726,7 +2730,7 @@ def extract_video_dataset_from_spreadsheet(
     dataset.sheet_title = title
     dataset.video_number_column = header_map.get("video_number")
     dataset.duration_column = header_map.get("duration")
-
+    
     # Fallbacks for common layouts where the video number and duration columns do
     # not have recognizable headers. In the source "Videos" sheet the video
     # number typically appears immediately to the left of the team column, while
@@ -2740,6 +2744,7 @@ def extract_video_dataset_from_spreadsheet(
         if duration_candidate >= 0:
             dataset.duration_column = duration_candidate
     dataset.match_column = header_map.get("match")
+    dataset.team_column = team_column
 
     processed_rows = 0
 
@@ -2784,11 +2789,13 @@ def extract_video_dataset_from_spreadsheet(
                     time_value = candidate
 
         video_number_value: Optional[str] = None
+        video_number_text: Optional[str] = None
         if dataset.video_number_column is not None:
             number_cell = columns.get(dataset.video_number_column)
             if number_cell is not None:
                 candidate = _extract_cell_text(number_cell).strip()
                 if candidate:
+                    video_number_text = candidate
                     digits = re.findall(r"\d+", candidate)
                     if digits:
                         video_number_value = digits[-1].lstrip("0") or "0"
@@ -2796,11 +2803,13 @@ def extract_video_dataset_from_spreadsheet(
                         video_number_value = candidate
 
         duration_value: Optional[str] = None
+        duration_text: Optional[str] = None
         if dataset.duration_column is not None:
             duration_cell = columns.get(dataset.duration_column)
             if duration_cell is not None:
                 candidate = _extract_cell_text(duration_cell).strip()
                 if candidate:
+                    duration_text = candidate
                     duration_value = candidate
 
         entry = VideoEntry(
@@ -2812,6 +2821,9 @@ def extract_video_dataset_from_spreadsheet(
             row_index=row_index,
             video_number=video_number_value,
             duration=duration_value,
+            team_cell_text=team_text,
+            video_number_cell_text=video_number_text,
+            duration_cell_text=duration_text,
         )
         dataset.entries.append(entry)
         processed_rows += 1
@@ -3337,6 +3349,7 @@ def apply_team_video_updates(
         slot = assignment.slot
         entry = assignment.video
         code = assignment.country_code
+        dataset = assignment.dataset
         display_name = get_country_display_name(code)
         if not display_name:
             display_name = strip_leading_flag_emoji(entry.team_name)
@@ -3356,6 +3369,38 @@ def apply_team_video_updates(
             }
         )
 
+        source_sheet_title = dataset.sheet_title
+        source_row_number = entry.row_index + 1
+        source_team_column = dataset.team_column
+        source_team_cell = (
+            column_index_to_letter(source_team_column) + str(source_row_number)
+            if source_team_column is not None
+            else None
+        )
+        source_team_value = entry.team_cell_text or entry.team_name
+        source_video_number_column = dataset.video_number_column
+        source_video_number_cell = (
+            column_index_to_letter(source_video_number_column) + str(source_row_number)
+            if source_video_number_column is not None
+            else None
+        )
+        source_duration_column = dataset.duration_column
+        source_duration_cell = (
+            column_index_to_letter(source_duration_column) + str(source_row_number)
+            if source_duration_column is not None
+            else None
+        )
+        source_video_number_value = (
+            entry.video_number_cell_text
+            if entry.video_number_cell_text is not None
+            else entry.video_number or ""
+        )
+        source_duration_value = (
+            entry.duration_cell_text
+            if entry.duration_cell_text is not None
+            else entry.duration or ""
+        )
+
         video_number_value = (entry.video_number or "").strip()
         video_number_column = slot.video_number_column
         if video_number_column is None and slot.task_column > 0:
@@ -3368,7 +3413,10 @@ def apply_team_video_updates(
         print(
             "[Apply Team Video Updates] Video number inputs:",
             f"sheet={sheet_title!r}, column={video_number_column}, cell={video_number_cell}, "
-            f"value={video_number_value!r}",
+            f"value={video_number_value!r}; source_sheet={source_sheet_title!r}, source_row={source_row_number}, "
+            f"source_team_cell={source_team_cell}, source_team_value={source_team_value!r}, "
+            f"source_video_number_cell={source_video_number_cell}, source_video_number_value={source_video_number_value!r}, "
+            f"normalized_source_video_number={entry.video_number!r}",
         )
         if video_number_column is not None and video_number_value:
             assert video_number_cell is not None
@@ -3392,7 +3440,10 @@ def apply_team_video_updates(
         print(
             "[Apply Team Video Updates] Duration inputs:",
             f"sheet={sheet_title!r}, column={duration_column}, cell={duration_cell}, "
-            f"value={duration_value!r}",
+            f"value={duration_value!r}; source_sheet={source_sheet_title!r}, source_row={source_row_number}, "
+            f"source_team_cell={source_team_cell}, source_team_value={source_team_value!r}, "
+            f"source_duration_cell={source_duration_cell}, source_duration_value={source_duration_value!r}, "
+            f"normalized_source_duration={entry.duration!r}",
         )
         if duration_column is not None and duration_value:
             assert duration_cell is not None
@@ -3404,7 +3455,6 @@ def apply_team_video_updates(
                 }
             )
 
-        dataset = assignment.dataset
         match_column = dataset.match_column
         if match_column is not None:
             match_cell = column_index_to_letter(match_column) + str(entry.row_index + 1)
