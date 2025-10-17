@@ -563,18 +563,59 @@ class MatchScheduleImporterUI:
             "matchNumberDisplay",
             "matchnumber",
             "matchNo",
+            "id",
         ):
             number = self._coerce_match_number(match.get(key))
             if number is not None:
                 return number
 
-        fallback = match.get("matchKey") or match.get("match") or match.get("id")
-        if isinstance(fallback, str):
-            digits = re.findall(r"\d+", fallback)
-            if digits:
-                return int(digits[-1])
+        for fallback_key in ("matchKey", "match"):
+            number = self._coerce_match_number(match.get(fallback_key))
+            if number is not None:
+                return number
 
         return None
+
+    def describe_match(self, match: Mapping[str, Any]) -> str:
+        """Return a human-readable summary of a match entry for diagnostics."""
+
+        def _format_value(value: Any) -> Optional[str]:
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                if isinstance(value, float) and not value.is_integer():
+                    return str(value)
+                return str(int(value)) if isinstance(value, float) else str(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    return text
+                return None
+            return None
+
+        details: List[str] = []
+        for label in ("matchKey", "description", "name", "id"):
+            formatted = _format_value(match.get(label))
+            if formatted:
+                details.append(f"{label}={formatted}")
+                break
+
+        scheduled = _format_value(match.get("scheduledTime"))
+        if scheduled:
+            details.append(f"scheduledTime={scheduled}")
+
+        field_value = match.get("field")
+        field_formatted = _format_value(field_value)
+        if field_formatted:
+            details.append(f"field={field_formatted}")
+
+        if details:
+            return ", ".join(details)
+
+        keys = ", ".join(sorted(map(str, match.keys())))
+        if keys:
+            return f"available keys: {keys}"
+        return "no additional details available"
 
     def _coerce_match_number(self, value: Any) -> Optional[int]:
         if isinstance(value, bool):
@@ -1558,8 +1599,11 @@ class MatchNumberGeneratorUI:
             for match in matches_for_date:
                 match_number = self.match_schedule_importer.extract_match_number(match)
                 if match_number is None:
+                    match_details = self.match_schedule_importer.describe_match(match)
                     message = (
-                        f"The imported schedule is missing a match number for a match on {date}."
+                        "The imported schedule entry is missing a match number. "
+                        f"Date: {date}. Match details: {match_details}. "
+                        "Ensure this entry includes an 'id' or 'matchNumber' value."
                     )
                     return {}, message, []
                 numbers.append(match_number)
