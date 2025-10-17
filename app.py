@@ -15,9 +15,11 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
     )
 
 import itertools
+import json
 import re
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -236,6 +238,21 @@ def build_config_tab(
     )
     ros_document_loader.render(row=1)
 
+    separator_two = ttk.Separator(parent, orient="horizontal")
+    separator_two.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
+
+    match_schedule_frame = ttk.Frame(parent, padding=(12, 6, 12, 12))
+    match_schedule_frame.grid(row=4, column=0, sticky="nsew")
+    match_schedule_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(
+        match_schedule_frame,
+        text="Import Match Schedule",
+        font=("Helvetica", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+    MatchScheduleImporterUI(match_schedule_frame, console).render(row=1)
+
     return credentials_manager, ros_document_loader
 
 
@@ -280,6 +297,137 @@ def build_tools_tab(
         match_frame, credentials_manager, ros_document_loader, console
     ).render(row=1)
 
+
+class MatchScheduleImporterUI:
+    """Import match schedules from JSON files within the Config tab."""
+
+    FIELD_NUMBER = 5
+
+    def __init__(self, parent: ttk.Frame, console: ApplicationConsole) -> None:
+        self.parent = parent
+        self.console = console
+        self.file_path_var = tk.StringVar()
+        self._status_var = tk.StringVar()
+        self._matches: List[Dict[str, Any]] = []
+
+    def render(self, row: int) -> None:
+        ttk.Label(self.parent, text="Selected file:").grid(
+            row=row, column=0, sticky="w", pady=(8, 0)
+        )
+
+        file_display = ttk.Entry(
+            self.parent,
+            textvariable=self.file_path_var,
+            state="readonly",
+        )
+        file_display.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        import_button = ttk.Button(
+            self.parent,
+            text="Import Match Schedule",
+            command=self.import_schedule,
+        )
+        import_button.grid(row=row + 1, column=1, sticky="e", pady=8)
+
+        status_label = ttk.Label(
+            self.parent,
+            textvariable=self._status_var,
+            wraplength=520,
+            justify="left",
+        )
+        status_label.grid(row=row + 2, column=0, columnspan=2, sticky="w")
+
+        self._set_status("No match schedule imported yet.", log=False)
+
+    def import_schedule(self) -> None:
+        filename = filedialog.askopenfilename(
+            parent=self.parent,
+            title="Select match schedule JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*")],
+        )
+        if not filename:
+            return
+
+        try:
+            with open(filename, "r", encoding="utf-8") as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            self._set_status("Selected file could not be found.")
+            return
+        except json.JSONDecodeError as exc:
+            self._set_status(f"Failed to parse JSON: {exc}")
+            return
+        except OSError as exc:
+            self._set_status(f"Unable to read file: {exc}")
+            return
+
+        matches = data.get("matches") if isinstance(data, dict) else None
+        if not isinstance(matches, list):
+            self._set_status("JSON file does not contain a 'matches' list.")
+            return
+
+        self._matches = matches
+        self.file_path_var.set(filename)
+
+        field_counts = self._count_field_matches(matches)
+        total_matches = len(matches)
+        field_total = sum(field_counts.values())
+
+        self._log_field_counts(field_counts)
+
+        if field_counts:
+            summary = (
+                f"Imported {total_matches} matches. {field_total} occur on Field {self.FIELD_NUMBER}."
+            )
+        else:
+            summary = (
+                f"Imported {total_matches} matches. No matches found on Field {self.FIELD_NUMBER}."
+            )
+        self._set_status(summary)
+
+    def _count_field_matches(self, matches: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for match in matches:
+            field = match.get("field")
+            if field != self.FIELD_NUMBER:
+                continue
+            scheduled_time = match.get("scheduledTime")
+            if not isinstance(scheduled_time, str):
+                continue
+            date_str = self._extract_date(scheduled_time)
+            if not date_str:
+                continue
+            counts[date_str] = counts.get(date_str, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def _extract_date(self, timestamp: str) -> Optional[str]:
+        timestamp = timestamp.strip()
+        if not timestamp:
+            return None
+        normalized = timestamp.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized).date().isoformat()
+        except ValueError:
+            if "T" in timestamp:
+                candidate = timestamp.split("T", 1)[0]
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
+                    return candidate
+            return None
+
+    def _log_field_counts(self, counts: Dict[str, int]) -> None:
+        if not counts:
+            self.console.log(
+                f"[Match Schedule Importer] No matches on Field {self.FIELD_NUMBER} were found."
+            )
+            return
+        for date, total in counts.items():
+            message = f"{date} has {total} matches on Field {self.FIELD_NUMBER}"
+            self.console.log(f"[Match Schedule Importer] {message}")
+
+    def _set_status(self, message: str, *, log: bool = True) -> None:
+        self._status_var.set(message)
+        if log:
+            self.console.log(f"[Match Schedule Importer] {message}")
 
 class GoogleDriveCredentialsManager:
     """Handle selection and loading of Google Drive OAuth credentials."""
