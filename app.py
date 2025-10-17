@@ -2885,6 +2885,9 @@ def compute_team_video_assignments(
     unique_codes = sorted({code for _, codes in slot_candidates for code in codes})
     if len(unique_codes) < len(slot_candidates):
         diagnostics.append(
+            f"{len(slot_candidates)} placeholders reached assignment, but only {len(unique_codes)} unique country videos were available."
+        )
+        diagnostics.append(
             "Fewer unique country videos are available than placeholders; some placeholders may remain unassigned."
         )
 
