@@ -385,6 +385,7 @@ def _generate_country_name_variants(name: str) -> Set[str]:
 
 
 COUNTRY_CODE_TO_INFO: Dict[str, Tuple[str, str]] = {}
+ISO2_TO_ISO3: Dict[str, str] = {}
 COUNTRY_NAME_TO_CODE: Dict[str, str] = {}
 
 for line in COUNTRY_CODE_DATA.strip().splitlines():
@@ -392,6 +393,8 @@ for line in COUNTRY_CODE_DATA.strip().splitlines():
     iso3 = iso3.upper()
     iso2 = iso2.upper()
     COUNTRY_CODE_TO_INFO[iso3] = (name, iso2)
+    if len(iso2) == 2 and iso2.isalpha() and iso2 not in ISO2_TO_ISO3:
+        ISO2_TO_ISO3[iso2] = iso3
 
     variants = _generate_country_name_variants(name)
     variants.update(ADDITIONAL_COUNTRY_ALIASES.get(iso3, ()))
@@ -2682,8 +2685,13 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> List[str]:
             return
         if isinstance(value, str):
             candidate = value.strip().upper()
-            if re.fullmatch(r"[A-Z]{3}", candidate) and candidate in COUNTRY_CODE_TO_INFO:
-                codes.add(candidate)
+            iso3_candidate: Optional[str] = None
+            if re.fullmatch(r"[A-Z]{2}", candidate):
+                iso3_candidate = ISO2_TO_ISO3.get(candidate)
+            elif re.fullmatch(r"[A-Z]{3}", candidate) and candidate in COUNTRY_CODE_TO_INFO:
+                iso3_candidate = candidate
+            if iso3_candidate:
+                codes.add(iso3_candidate)
             return
         if isinstance(value, Mapping):
             for key in (
