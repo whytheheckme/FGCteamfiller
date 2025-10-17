@@ -14,12 +14,13 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
         "On macOS with Homebrew Python, install it with 'brew install python-tk@3.13'."
     )
 
-import math
+import itertools
+import re
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - optional dependency
     from google.oauth2.credentials import Credentials
@@ -39,6 +40,13 @@ try:  # pragma: no cover - optional dependency
     from google.auth.transport.requests import Request
 except ModuleNotFoundError:  # pragma: no cover - handled at runtime
     Request = None  # type: ignore[assignment]
+
+
+FLAG_EMOJI_PATTERN = re.compile(r"^\s*([\U0001F1E6-\U0001F1FF]{2})")
+PLACEHOLDER_CODE_PATTERN = re.compile(
+    r"^TEAM VIDEO PLACEHOLDER ([A-Z]{3})\b",
+    re.IGNORECASE,
+)
 
 
 def _get_widget_background(widget: tk.Misc, fallback: tk.Misc) -> str:
@@ -700,16 +708,6 @@ class ROSDocumentLoaderUI:
 class ROSPlaceholderGeneratorUI:
     """User interface wrapper for the ROS placeholder generator tool."""
 
-    # Light Cornflower Blue 3 as exported by Google Sheets, used to flag
-    # placeholder cells. The previous value was copied from an external source
-    # and did not match the actual cell color (≈#C9DAF8), causing detection to
-    # miss legitimately highlighted rows.
-    COLOR_TARGET = (0.788, 0.855, 0.973)
-    # Allow small deviations when Google Sheets exports floating point values for
-    # the Light Cornflower Blue 3 placeholder color.  Values outside of this
-    # tolerance are considered a different shade entirely.
-    COLOR_TOLERANCE = 0.02
-
     def __init__(
         self,
         parent: ttk.Frame,
@@ -804,8 +802,12 @@ class ROSPlaceholderGeneratorUI:
                 self.parent.after(0, lambda: self.set_status(message))
                 return
 
-            success_message = format_report(report, diagnostics)
-            self.parent.after(0, lambda: self._handle_placeholder_success(success_message, spreadsheet_title))
+            self.parent.after(
+                0,
+                lambda: self._handle_placeholder_success(
+                    report, diagnostics, spreadsheet_title
+                ),
+            )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -814,10 +816,24 @@ class ROSPlaceholderGeneratorUI:
         if log:
             self.console.log(f"[ROS Placeholder Generator] {message}")
 
-    def _handle_placeholder_success(self, message: str, spreadsheet_title: str) -> None:
+    def _handle_placeholder_success(
+        self,
+        report: Dict[str, List[str]],
+        diagnostics: Sequence[str],
+        spreadsheet_title: str,
+    ) -> None:
         if spreadsheet_title:
             self.document_loader.set_document_name(spreadsheet_title)
-        self.set_status(message)
+
+        console_message = format_report(report, diagnostics)
+        status_message = format_report(
+            report,
+            diagnostics,
+            success_header="",
+        )
+
+        self.console.log(f"[ROS Placeholder Generator] {console_message}")
+        self.set_status(status_message, log=False)
 
 
 class MatchNumberGeneratorUI:
@@ -1025,13 +1041,21 @@ class MatchNumberGeneratorUI:
         if diagnostics:
             self._log_diagnostics(diagnostics)
 
-        success_message = format_report(
+        console_message = format_report(
             report,
             (),
             success_header="Ranking match numbers applied:",
             empty_message="No RANKING MATCH cells were updated.",
         )
-        self.set_status(success_message)
+        status_message = format_report(
+            report,
+            (),
+            success_header="",
+            empty_message="No RANKING MATCH cells were updated.",
+        )
+
+        self.console.log(f"[Match Number Generator] {console_message}")
+        self.set_status(status_message, log=False)
 
     def _gather_analysis_diagnostics(
         self, sheet_entries: Sequence[Dict[str, Any]]
@@ -1168,10 +1192,11 @@ def generate_placeholders_for_sheet(
 
     Returns the applied updates together with diagnostics describing how the
     spreadsheet was inspected (for example, which column contained the ``TASK``
-    header and sample colors that were evaluated), and the spreadsheet title.
+    header and sample values that began with a flag emoji), and the spreadsheet
+    title.
     """
 
-    spreadsheet, theme_supported, service = _fetch_spreadsheet(
+    spreadsheet, _theme_supported, service = _fetch_spreadsheet(
         credentials, spreadsheet_id
     )
     spreadsheet_title = str(
@@ -1180,19 +1205,9 @@ def generate_placeholders_for_sheet(
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
     diagnostics: List[str] = [
-        (
-            "Placeholder detection uses Light Cornflower Blue 3 with RGB "
-            f"{ROSPlaceholderGeneratorUI.COLOR_TARGET!r}."
-        )
+        "Placeholder detection looks for rows whose TASK value begins with an emoji flag.",
     ]
     data_updates: List[Dict[str, Sequence[Sequence[str]]]] = []
-
-    if not theme_supported:
-        diagnostics.append(
-            "Spreadsheet theme colors were unavailable; falling back to raw RGB values."
-        )
-
-    theme_colors = _build_theme_color_map(spreadsheet.get("spreadsheetTheme", {}))
 
     for sheet in spreadsheet.get("sheets", []):
         properties = sheet.get("properties", {})
@@ -1214,17 +1229,25 @@ def generate_placeholders_for_sheet(
             f"{title}: TASK column located at index {task_column} (column {column_letter})."
         )
 
-        matching_cells = find_placeholder_cells(
-            sheet_data, task_column, diagnostics, title, theme_colors
+        matching_cells, existing_codes = find_placeholder_cells(
+            sheet_data, task_column, diagnostics, title
         )
         if not matching_cells:
             diagnostics.append(
-                f"{title}: No cells matched the placeholder color in column {column_letter}."
+                f"{title}: No cells beginning with a flag emoji were found in column {column_letter}."
             )
             continue
 
         updates[title] = []
         code_iter = placeholder_code_iter(letter_prefix)
+
+        highest_existing_index = _highest_placeholder_index(existing_codes, letter_prefix)
+        if highest_existing_index is not None:
+            code_iter = itertools.islice(
+                code_iter,
+                highest_existing_index + 1,
+                None,
+            )
         for row_index in matching_cells:
             code = next(code_iter)
             cell_a1 = column_index_to_letter(task_column) + str(row_index + 1)
@@ -1456,34 +1479,6 @@ def _extract_cell_text(cell: Dict[str, Any]) -> str:
 
     return ""
 
-
-def _build_theme_color_map(
-    spreadsheet_theme: Dict[str, Any]
-) -> Dict[str, Dict[str, float]]:
-    """Return a mapping of theme color names to resolved RGB components."""
-
-    theme_colors: Dict[str, Dict[str, float]] = {}
-    for entry in spreadsheet_theme.get("themeColors", []):
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("colorType")
-        style = entry.get("color", entry.get("colorStyle", {}))
-        rgb_color = {}
-        if isinstance(style, dict):
-            rgb_color = style.get("rgbColor", {})
-        if (
-            isinstance(name, str)
-            and isinstance(rgb_color, dict)
-            and rgb_color
-        ):
-            theme_colors[name] = {
-                "red": float(rgb_color.get("red", 1.0)),
-                "green": float(rgb_color.get("green", 1.0)),
-                "blue": float(rgb_color.get("blue", 1.0)),
-            }
-    return theme_colors
-
-
 def find_task_column(sheet_data: Sequence[dict]) -> Optional[int]:
     """Locate the zero-based column index containing the TASK header."""
 
@@ -1509,99 +1504,74 @@ def find_placeholder_cells(
     column_index: int,
     diagnostics: Optional[List[str]] = None,
     sheet_title: str = "",
-    theme_colors: Optional[Dict[str, Dict[str, float]]] = None,
-) -> List[int]:
-    """Return the row indices containing the target placeholder color."""
+) -> Tuple[List[int], Set[str]]:
+    """Return placeholder rows and any existing placeholder codes in the column."""
 
     matches: List[int] = []
+    existing_codes: Set[str] = set()
     seen_rows: set[int] = set()
     sample_count = 0
+
     for row_index, cell in _iter_column_cells(sheet_data, column_index):
-        color, color_source = _get_cell_color(cell, theme_colors)
+        text = _extract_cell_text(cell)
+        if not text:
+            continue
+
+        code = _extract_placeholder_code(text)
+        if code:
+            existing_codes.add(code)
+
+        if not _starts_with_flag_emoji(text):
+            continue
+
+        if row_index in seen_rows:
+            continue
+
+        matches.append(row_index)
+        seen_rows.add(row_index)
 
         if diagnostics is not None and sample_count < 5:
-            red = color.get("red", 1.0)
-            green = color.get("green", 1.0)
-            blue = color.get("blue", 1.0)
+            preview = text.splitlines()[0][:40]
             diagnostics.append(
-                (
-                    f"{sheet_title}: Row {row_index + 1} color rgb=({red:.3f}, {green:.3f}, {blue:.3f})"
-                    f" from {color_source}."
-                )
+                f"{sheet_title}: Row {row_index + 1} flagged for placeholder replacement with value {preview!r}."
             )
             sample_count += 1
 
-        if is_light_cornflower_blue(color):
-            if row_index not in seen_rows:
-                matches.append(row_index)
-                seen_rows.add(row_index)
-    return matches
+    return matches, existing_codes
 
 
-def _get_cell_color(
-    cell: Dict[str, Any], theme_colors: Optional[Dict[str, Dict[str, float]]]
-) -> Tuple[Dict[str, float], str]:
-    """Extract a color dictionary and describe the source used."""
+def _starts_with_flag_emoji(text: str) -> bool:
+    """Return True if *text* begins with an emoji flag after optional whitespace."""
 
-    # ``userEnteredFormat`` contains the formatting explicitly applied by the
-    # user, whereas ``effectiveFormat`` reflects the resolved styling Google
-    # Sheets would display.  When a spreadsheet is opened in compatibility
-    # mode, ``effectiveFormat`` often reports the default white background even
-    # though ``userEnteredFormat`` retains the actual fill color we need to
-    # detect placeholders.  Prefer the user-entered data and fall back to the
-    # effective values if necessary.
-    sources = (
-        ("userEnteredFormat", cell.get("userEnteredFormat", {})),
-        ("effectiveFormat", cell.get("effectiveFormat", {})),
-    )
+    return bool(FLAG_EMOJI_PATTERN.match(text))
 
-    for prefix, fmt in sources:
-        if not isinstance(fmt, dict):
+
+def _extract_placeholder_code(text: str) -> Optional[str]:
+    """Extract an existing placeholder code from *text*, if present."""
+
+    match = PLACEHOLDER_CODE_PATTERN.match(text.strip())
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def _highest_placeholder_index(existing_codes: Set[str], prefix: str) -> Optional[int]:
+    """Return the highest placeholder index encountered for *prefix*, if any."""
+
+    highest: Optional[int] = None
+    for code in existing_codes:
+        if len(code) != 3 or not code.startswith(prefix):
             continue
 
-        background = fmt.get("backgroundColor")
-        if isinstance(background, dict) and background:
-            return (
-                {
-                    "red": float(background.get("red", 1.0)),
-                    "green": float(background.get("green", 1.0)),
-                    "blue": float(background.get("blue", 1.0)),
-                },
-                f"{prefix}.backgroundColor",
-            )
-
-        style = fmt.get("backgroundColorStyle")
-        if not isinstance(style, dict):
+        suffix = code[1:]
+        if not suffix.isalpha():
             continue
 
-        rgb_color = style.get("rgbColor")
-        if isinstance(rgb_color, dict) and rgb_color:
-            return (
-                {
-                    "red": float(rgb_color.get("red", 1.0)),
-                    "green": float(rgb_color.get("green", 1.0)),
-                    "blue": float(rgb_color.get("blue", 1.0)),
-                },
-                f"{prefix}.backgroundColorStyle.rgbColor",
-            )
+        index = (ord(suffix[0]) - 65) * 26 + (ord(suffix[1]) - 65)
+        if highest is None or index > highest:
+            highest = index
 
-        theme_name = style.get("themeColor")
-        if (
-            isinstance(theme_name, str)
-            and theme_colors is not None
-            and theme_name in theme_colors
-        ):
-            theme_color = theme_colors[theme_name]
-            return (
-                {
-                    "red": float(theme_color.get("red", 1.0)),
-                    "green": float(theme_color.get("green", 1.0)),
-                    "blue": float(theme_color.get("blue", 1.0)),
-                },
-                f"{prefix}.backgroundColorStyle.themeColor={theme_name}",
-            )
-
-    return ({"red": 1.0, "green": 1.0, "blue": 1.0}, "default")
+    return highest
 
 
 def _iter_column_cells(
@@ -1622,38 +1592,6 @@ def _iter_column_cells(
             if cell_index >= len(values):
                 continue
             yield row_index, values[cell_index]
-
-
-def is_light_cornflower_blue(color: Dict[str, float]) -> bool:
-    """Return True if the color closely matches Light Cornflower Blue 3."""
-
-    target = ROSPlaceholderGeneratorUI.COLOR_TARGET
-    tolerance = ROSPlaceholderGeneratorUI.COLOR_TOLERANCE
-
-    def _channel(name: str) -> float:
-        value = color.get(name, 1.0)
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 1.0
-
-    red = _channel("red")
-    green = _channel("green")
-    blue = _channel("blue")
-
-    # The placeholder colour is distinctly blue.  Reject obvious false positives
-    # before performing the more expensive distance calculation.
-    if red > green + tolerance:
-        return False
-    if green > blue + tolerance:
-        return False
-
-    distance = math.sqrt(
-        (red - target[0]) ** 2
-        + (green - target[1]) ** 2
-        + (blue - target[2]) ** 2
-    )
-    return distance <= tolerance
 
 
 def placeholder_code_iter(prefix: str) -> Iterable[str]:
@@ -1697,7 +1635,8 @@ def format_report(
 
     lines: List[str] = []
     if report:
-        lines.append(success_header)
+        if success_header:
+            lines.append(success_header)
         for sheet, entries in report.items():
             lines.append(f"• {sheet}:")
             for entry in entries:
