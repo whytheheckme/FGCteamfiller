@@ -14,6 +14,7 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
         "On macOS with Homebrew Python, install it with 'brew install python-tk@3.13'."
     )
 
+import math
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -704,6 +705,7 @@ class ROSPlaceholderGeneratorUI:
     # and did not match the actual cell color (≈#C9DAF8), causing detection to
     # miss legitimately highlighted rows.
     COLOR_TARGET = (0.788, 0.855, 0.973)
+    COLOR_TOLERANCE = 0.002
 
     def __init__(
         self,
@@ -1620,13 +1622,18 @@ def _iter_column_cells(
 
 
 def is_light_cornflower_blue(color: Dict[str, float]) -> bool:
-    """Return True if the color matches Light Cornflower Blue 3 exactly."""
+    """Return True if the color closely matches Light Cornflower Blue 3."""
 
     target = ROSPlaceholderGeneratorUI.COLOR_TARGET
+    tolerance = ROSPlaceholderGeneratorUI.COLOR_TOLERANCE
     red = float(color.get("red", 1.0))
     green = float(color.get("green", 1.0))
     blue = float(color.get("blue", 1.0))
-    return red == target[0] and green == target[1] and blue == target[2]
+    return (
+        math.isclose(red, target[0], abs_tol=tolerance)
+        and math.isclose(green, target[1], abs_tol=tolerance)
+        and math.isclose(blue, target[2], abs_tol=tolerance)
+    )
 
 
 def placeholder_code_iter(prefix: str) -> Iterable[str]:
