@@ -301,12 +301,13 @@ def build_tools_tab(
 class MatchScheduleImporterUI:
     """Import match schedules from JSON files within the Config tab."""
 
-    FIELD_NUMBER = 5
+    FIELD_OPTIONS = tuple(str(number) for number in range(1, 6))
 
     def __init__(self, parent: ttk.Frame, console: ApplicationConsole) -> None:
         self.parent = parent
         self.console = console
         self.file_path_var = tk.StringVar()
+        self.field_number_var = tk.StringVar(value=self.FIELD_OPTIONS[0])
         self._status_var = tk.StringVar()
         self._matches: List[Dict[str, Any]] = []
 
@@ -322,12 +323,25 @@ class MatchScheduleImporterUI:
         )
         file_display.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
+        ttk.Label(self.parent, text="Field:").grid(
+            row=row + 1, column=0, sticky="w", pady=(8, 0)
+        )
+
+        field_selector = ttk.Combobox(
+            self.parent,
+            textvariable=self.field_number_var,
+            values=self.FIELD_OPTIONS,
+            state="readonly",
+            width=5,
+        )
+        field_selector.grid(row=row + 1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
         import_button = ttk.Button(
             self.parent,
             text="Import Match Schedule",
             command=self.import_schedule,
         )
-        import_button.grid(row=row + 1, column=1, sticky="e", pady=8)
+        import_button.grid(row=row + 2, column=1, sticky="e", pady=8)
 
         status_label = ttk.Label(
             self.parent,
@@ -335,11 +349,16 @@ class MatchScheduleImporterUI:
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 2, column=0, columnspan=2, sticky="w")
+        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w")
 
         self._set_status("No match schedule imported yet.", log=False)
 
     def import_schedule(self) -> None:
+        field_number = self._get_selected_field()
+        if field_number is None:
+            self._set_status("Select a valid field number between 1 and 5.")
+            return
+
         filename = filedialog.askopenfilename(
             parent=self.parent,
             title="Select match schedule JSON",
@@ -369,27 +388,38 @@ class MatchScheduleImporterUI:
         self._matches = matches
         self.file_path_var.set(filename)
 
-        field_counts = self._count_field_matches(matches)
+        field_counts = self._count_field_matches(matches, field_number)
         total_matches = len(matches)
         field_total = sum(field_counts.values())
 
-        self._log_field_counts(field_counts)
+        self._log_field_counts(field_counts, field_number)
 
         if field_counts:
             summary = (
-                f"Imported {total_matches} matches. {field_total} occur on Field {self.FIELD_NUMBER}."
+                f"Imported {total_matches} matches. {field_total} occur on Field {field_number}."
             )
         else:
             summary = (
-                f"Imported {total_matches} matches. No matches found on Field {self.FIELD_NUMBER}."
+                f"Imported {total_matches} matches. No matches found on Field {field_number}."
             )
         self._set_status(summary)
 
-    def _count_field_matches(self, matches: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    def _get_selected_field(self) -> Optional[int]:
+        try:
+            field_number = int(self.field_number_var.get())
+        except (TypeError, ValueError):
+            return None
+        if field_number < 1 or field_number > 5:
+            return None
+        return field_number
+
+    def _count_field_matches(
+        self, matches: Sequence[Dict[str, Any]], field_number: int
+    ) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for match in matches:
             field = match.get("field")
-            if field != self.FIELD_NUMBER:
+            if field != field_number:
                 continue
             scheduled_time = match.get("scheduledTime")
             if not isinstance(scheduled_time, str):
@@ -414,14 +444,14 @@ class MatchScheduleImporterUI:
                     return candidate
             return None
 
-    def _log_field_counts(self, counts: Dict[str, int]) -> None:
+    def _log_field_counts(self, counts: Dict[str, int], field_number: int) -> None:
         if not counts:
             self.console.log(
-                f"[Match Schedule Importer] No matches on Field {self.FIELD_NUMBER} were found."
+                f"[Match Schedule Importer] No matches on Field {field_number} were found."
             )
             return
         for date, total in counts.items():
-            message = f"{date} has {total} matches on Field {self.FIELD_NUMBER}"
+            message = f"{date} has {total} matches on Field {field_number}"
             self.console.log(f"[Match Schedule Importer] {message}")
 
     def _set_status(self, message: str, *, log: bool = True) -> None:
