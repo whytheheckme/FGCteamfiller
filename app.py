@@ -3238,6 +3238,10 @@ def generate_placeholders_for_sheet(
     for sheet in spreadsheet.get("sheets", []):
         properties = sheet.get("properties", {})
         title = properties.get("title", "Untitled")
+
+        if "OC" in title:
+            diagnostics.append(f"{title}: Skipped because the sheet name contains 'OC'.")
+            continue
         sheet_index = properties.get("index", 0)
         letter_prefix = chr(ord("A") + sheet_index)
 
