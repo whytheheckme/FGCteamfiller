@@ -2694,6 +2694,19 @@ def extract_video_dataset_from_spreadsheet(
     dataset.sheet_title = title
     dataset.video_number_column = header_map.get("video_number")
     dataset.duration_column = header_map.get("duration")
+
+    # Fallbacks for common layouts where the video number and duration columns do
+    # not have recognizable headers. In the source "Videos" sheet the video
+    # number typically appears immediately to the left of the team column, while
+    # the duration is two columns to the right of the team column. Use those
+    # relative positions when header detection fails so that the values can be
+    # copied into the schedule tabs.
+    if dataset.video_number_column is None and team_column > 0:
+        dataset.video_number_column = team_column - 1
+    if dataset.duration_column is None:
+        duration_candidate = team_column + 2
+        if duration_candidate >= 0:
+            dataset.duration_column = duration_candidate
     dataset.match_column = header_map.get("match")
 
     processed_rows = 0
