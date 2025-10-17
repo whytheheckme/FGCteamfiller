@@ -48,6 +48,15 @@ except ModuleNotFoundError:  # pragma: no cover - handled at runtime
 
 
 FLAG_EMOJI_PATTERN = re.compile(r"^\s*([\U0001F1E6-\U0001F1FF]{2})")
+COUNTRY_NAME_LEADING_NOISE_PATTERN = re.compile(
+    r"^(?:(?:first\s+global|fgc)\s+)?(?:team|delegation)\b[\s:-]*",
+    re.IGNORECASE,
+)
+COUNTRY_NAME_TRAILING_NOISE_PATTERN = re.compile(
+    r"[\s:-]*(?:team|delegation)\b$",
+    re.IGNORECASE,
+)
+ISO_CODE_IN_TEXT_PATTERN = re.compile(r"\b([A-Z]{3})\b")
 PLACEHOLDER_CODE_PATTERN = re.compile(
     r"^TEAM VIDEO PLACEHOLDER ([A-Z]{3})\b",
     re.IGNORECASE,
@@ -131,6 +140,23 @@ def strip_leading_flag_emoji(text: str) -> str:
         return text.strip()
     start, end = match.span(1)
     return (text[:start] + text[end:]).strip()
+
+
+def _strip_country_name_noise(name: str) -> str:
+    value = name.strip()
+    if not value:
+        return value
+
+    # Remove repeated leading noise phrases such as "FGC Team" or "Delegation".
+    while True:
+        cleaned = COUNTRY_NAME_LEADING_NOISE_PATTERN.sub("", value)
+        if cleaned == value:
+            break
+        value = cleaned.strip(" -–—,:")
+
+    value = re.sub(r"(?i)^of\b[\s:-]*", "", value).strip(" -–—,:")
+    value = COUNTRY_NAME_TRAILING_NOISE_PATTERN.sub("", value).strip(" -–—,:")
+    return value
 
 
 def _extract_numeric_cell_value(cell: Mapping[str, Any]) -> Optional[float]:
@@ -504,8 +530,14 @@ def normalize_country_code(code: str) -> Optional[str]:
     return None
 
 
+def normalize_country_lookup_value(name: str) -> str:
+    cleaned = strip_leading_flag_emoji(name)
+    cleaned = _strip_country_name_noise(cleaned)
+    return _normalize_country_name(cleaned)
+
+
 def lookup_country_code(name: str) -> Optional[str]:
-    normalized = _normalize_country_name(name)
+    normalized = normalize_country_lookup_value(name)
     if not normalized:
         return None
     code = COUNTRY_NAME_TO_CODE.get(normalized)
@@ -2722,7 +2754,8 @@ def extract_video_dataset_from_spreadsheet(
             continue
 
         cleaned_team = strip_leading_flag_emoji(team_text)
-        normalized_name = _normalize_country_name(cleaned_team)
+        display_team = _strip_country_name_noise(cleaned_team)
+        normalized_name = normalize_country_lookup_value(team_text)
 
         value_cell = columns.get(value_column)
         value = _extract_numeric_cell_value(value_cell or {}) if value_cell else None
@@ -2756,7 +2789,11 @@ def extract_video_dataset_from_spreadsheet(
             if number_cell is not None:
                 candidate = _extract_cell_text(number_cell).strip()
                 if candidate:
-                    video_number_value = candidate
+                    digits = re.findall(r"\d+", candidate)
+                    if digits:
+                        video_number_value = digits[-1].lstrip("0") or "0"
+                    else:
+                        video_number_value = candidate
 
         duration_value: Optional[str] = None
         if dataset.duration_column is not None:
@@ -2767,7 +2804,7 @@ def extract_video_dataset_from_spreadsheet(
                     duration_value = candidate
 
         entry = VideoEntry(
-            team_name=cleaned_team if cleaned_team else team_text,
+            team_name=display_team if display_team else (cleaned_team if cleaned_team else team_text),
             normalized_name=normalized_name,
             value=value,
             video_id=video_id,
@@ -2782,6 +2819,13 @@ def extract_video_dataset_from_spreadsheet(
         if normalized_name and normalized_name not in dataset.by_normalized_name:
             dataset.by_normalized_name[normalized_name] = entry
 
+        secondary_normalized = _normalize_country_name(cleaned_team)
+        if (
+            secondary_normalized
+            and secondary_normalized not in dataset.by_normalized_name
+        ):
+            dataset.by_normalized_name[secondary_normalized] = entry
+
         iso_candidate: Optional[str] = None
         paren_match = re.search(r"\(([A-Z]{3})\)", team_text)
         if paren_match:
@@ -2789,7 +2833,13 @@ def extract_video_dataset_from_spreadsheet(
             if candidate in COUNTRY_CODE_TO_INFO:
                 iso_candidate = candidate
         if iso_candidate is None:
-            iso_candidate = lookup_country_code(cleaned_team)
+            for match in ISO_CODE_IN_TEXT_PATTERN.findall(team_text.upper()):
+                candidate = match.upper()
+                if candidate in COUNTRY_CODE_TO_INFO:
+                    iso_candidate = candidate
+                    break
+        if iso_candidate is None:
+            iso_candidate = lookup_country_code(team_text)
         if iso_candidate and iso_candidate not in dataset.by_code:
             dataset.by_code[iso_candidate] = entry
 
@@ -3025,12 +3075,16 @@ def find_video_entry_for_code(code: str, dataset: VideoDataset) -> Optional[Vide
     candidate_names.extend(ADDITIONAL_COUNTRY_ALIASES.get(code, ()))
 
     for name in candidate_names:
-        normalized = _normalize_country_name(strip_leading_flag_emoji(name))
-        if not normalized:
-            continue
-        entry = dataset.by_normalized_name.get(normalized)
-        if entry is not None:
-            return entry
+        normalized_variants = [
+            normalize_country_lookup_value(name),
+            _normalize_country_name(strip_leading_flag_emoji(name)),
+        ]
+        for normalized in normalized_variants:
+            if not normalized:
+                continue
+            entry = dataset.by_normalized_name.get(normalized)
+            if entry is not None:
+                return entry
 
     for entry in dataset.entries:
         team_upper = entry.team_name.upper()
