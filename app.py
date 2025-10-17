@@ -949,11 +949,27 @@ class ROSPlaceholderGeneratorUI:
             self.document_loader.set_document_name(spreadsheet_title)
 
         console_message = format_report(report, diagnostics)
-        status_message = format_report(
-            report,
-            diagnostics,
-            success_header="",
-        )
+
+        if report:
+            total_updates = sum(len(entries) for entries in report.values())
+            sheet_count = len(report)
+            cell_word = "cell" if total_updates == 1 else "cells"
+            sheet_word = "sheet" if sheet_count == 1 else "sheets"
+            status_message = (
+                "Placeholder updates applied to "
+                f"{total_updates} {cell_word} across {sheet_count} {sheet_word}."
+            )
+            breakdowns = []
+            for sheet, entries in report.items():
+                entry_count = len(entries)
+                entry_cell_word = "cell" if entry_count == 1 else "cells"
+                breakdowns.append(
+                    f"{entry_count} {entry_cell_word} updated on sheet ({sheet})"
+                )
+            if breakdowns:
+                status_message += " " + ", ".join(breakdowns)
+        else:
+            status_message = "No matching placeholders were found."
 
         self.console.log(f"[ROS Placeholder Generator] {console_message}")
         self.set_status(status_message, log=False)
