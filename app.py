@@ -22,6 +22,7 @@ import threading
 import tkinter as tk
 import unicodedata
 from dataclasses import dataclass
+from enum import IntEnum
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -663,9 +664,14 @@ def _get_widget_background(widget: tk.Misc, fallback: tk.Misc) -> str:
 class ApplicationConsole:
     """Display log messages emitted by tools across the application."""
 
+    class LogLevel(IntEnum):
+        INFO = 10
+        WARN = 20
+
     def __init__(self, parent: tk.Misc) -> None:
         self.parent = parent
         self._text_widget: Optional[tk.Text] = None
+        self._level: "ApplicationConsole.LogLevel" = self.LogLevel.WARN
 
     def render(self, row: int) -> None:
         if hasattr(self.parent, "columnconfigure"):
@@ -733,11 +739,26 @@ class ApplicationConsole:
         frame.rowconfigure(1, weight=1)
         self._text_widget = text_widget
 
-    def log(self, message: str) -> None:
+    def get_level(self) -> "ApplicationConsole.LogLevel":
+        return self._level
+
+    def set_level(self, level: "ApplicationConsole.LogLevel") -> None:
+        self._level = level
+
+    def log(
+        self,
+        message: str,
+        *,
+        level: "ApplicationConsole.LogLevel" | None = None,
+    ) -> None:
         if not message:
             return
         widget = self._text_widget
         if widget is None:
+            return
+
+        current_level = level if level is not None else self.LogLevel.WARN
+        if current_level < self._level:
             return
 
         def _append() -> None:
@@ -749,6 +770,12 @@ class ApplicationConsole:
             widget.configure(state="disabled")
 
         widget.after(0, _append)
+
+    def log_info(self, message: str) -> None:
+        self.log(message, level=self.LogLevel.INFO)
+
+    def log_warn(self, message: str) -> None:
+        self.log(message, level=self.LogLevel.WARN)
 
 
 def create_main_window() -> tk.Tk:
@@ -2483,6 +2510,7 @@ class OptimizeTeamVideosUI:
                     spreadsheet_id,
                     matches,
                     self.match_schedule_importer,
+                    console=self.console,
                 )
             except Exception as exc:  # pragma: no cover - network interaction
                 message = f"Failed to update spreadsheet: {exc}"
@@ -3047,13 +3075,13 @@ def build_match_country_map(
             display_formatted = (
                 "[]" if not display_names else f"[{', '.join(display_names)}]"
             )
-            console.log(
+            console.log_info(
                 f"{prefix} Match #{match_number}: raw country values -> {raw_formatted}"
             )
-            console.log(
+            console.log_info(
                 f"{prefix} Match #{match_number}: normalized country codes -> {normalized_formatted}"
             )
-            console.log(
+            console.log_info(
                 f"{prefix} Match #{match_number}: display country names -> {display_formatted}"
             )
         if not countries:
@@ -3161,6 +3189,8 @@ def compute_team_video_assignments(
     slots: Sequence[PlaceholderSlot],
     match_countries: Mapping[int, Sequence[str]],
     dataset: VideoDataset,
+    *,
+    console: Optional[ApplicationConsole] = None,
 ) -> Tuple[List[PlaceholderAssignment], List[str]]:
     diagnostics: List[str] = []
     slot_candidates: List[Tuple[PlaceholderSlot, List[str]]] = []
@@ -3207,10 +3237,11 @@ def compute_team_video_assignments(
             continue
 
         if match_key not in logged_matches:
-            print(
-                "[Optimize Team Videos] Match #"
-                f"{slot.match_number} schedule countries: {_format_country_codes_for_log(normalized_codes)}"
-            )
+            if console is not None:
+                console.log_info(
+                    "[Optimize Team Videos] Match #"
+                    f"{slot.match_number} schedule countries: {_format_country_codes_for_log(normalized_codes)}"
+                )
             logged_matches.add(match_key)
 
         valid_codes: List[str] = []
@@ -3229,10 +3260,11 @@ def compute_team_video_assignments(
                     f"No videos found for countries {formatted_missing} in match #{slot.match_number}."
                 )
                 missing_logged.add(match_key)
-            print(
-                "[Optimize Team Videos] Missing videos for match #"
-                f"{slot.match_number}: {formatted_missing}"
-            )
+            if console is not None:
+                console.log_info(
+                    "[Optimize Team Videos] Missing videos for match #"
+                    f"{slot.match_number}: {formatted_missing}"
+                )
 
         if not valid_codes:
             diagnostics.append(
@@ -3245,19 +3277,23 @@ def compute_team_video_assignments(
     if not slot_candidates:
         return [], diagnostics
 
-    print("[Optimize Team Videos] Slot candidates and available country videos:")
-    for slot, codes in slot_candidates:
-        print(
-            "  - Sheet="
-            f"{slot.sheet_title!r}, match #{slot.match_number}, placeholder index {slot.placeholder_index}: "
-            f"{', '.join(sorted(set(codes)))}"
+    if console is not None:
+        console.log_info(
+            "[Optimize Team Videos] Slot candidates and available country videos:"
         )
+        for slot, codes in slot_candidates:
+            console.log_info(
+                "  - Sheet="
+                f"{slot.sheet_title!r}, match #{slot.match_number}, placeholder index {slot.placeholder_index}: "
+                f"{', '.join(sorted(set(codes)))}"
+            )
 
     unique_codes = sorted({code for _, codes in slot_candidates for code in codes})
-    print(
-        "[Optimize Team Videos] Unique country videos identified: "
-        f"{', '.join(unique_codes) if unique_codes else '(none)'}"
-    )
+    if console is not None:
+        console.log_info(
+            "[Optimize Team Videos] Unique country videos identified: "
+            f"{', '.join(unique_codes) if unique_codes else '(none)'}"
+        )
     if len(unique_codes) < len(slot_candidates):
         diagnostics.append(
             f"{len(slot_candidates)} placeholders reached assignment, but only {len(unique_codes)} unique country videos were available."
@@ -3334,6 +3370,8 @@ def apply_team_video_updates(
     credentials: Credentials,
     spreadsheet_id: str,
     assignments: Sequence[PlaceholderAssignment],
+    *,
+    console: Optional[ApplicationConsole] = None,
 ) -> Tuple[Dict[str, List[str]], List[str]]:
     updates: Dict[str, List[str]] = {}
     data_updates: List[Dict[str, Any]] = []
@@ -3403,14 +3441,15 @@ def apply_team_video_updates(
             if video_number_column is not None
             else None
         )
-        print(
-            "[Apply Team Video Updates] Video number inputs:",
-            f"sheet={sheet_title!r}, column={video_number_column}, cell={video_number_cell}, "
-            f"value={video_number_value!r}; source_sheet={source_sheet_title!r}, source_row={source_row_number}, "
-            f"source_team_cell={source_team_cell}, source_team_value={source_team_value!r}, "
-            f"source_video_number_cell={source_video_number_cell}, source_video_number_value={source_video_number_value!r}, "
-            f"normalized_source_video_number={entry.video_number!r}",
-        )
+        if console is not None:
+            console.log_info(
+                "[Apply Team Video Updates] Video number inputs: "
+                f"sheet={sheet_title!r}, column={video_number_column}, cell={video_number_cell}, "
+                f"value={video_number_value!r}; source_sheet={source_sheet_title!r}, source_row={source_row_number}, "
+                f"source_team_cell={source_team_cell}, source_team_value={source_team_value!r}, "
+                f"source_video_number_cell={source_video_number_cell}, source_video_number_value={source_video_number_value!r}, "
+                f"normalized_source_video_number={entry.video_number!r}"
+            )
         if video_number_column is not None and video_number_value:
             assert video_number_cell is not None
             sheet_updates.append(f"{video_number_cell}: Video Nº {video_number_value}")
@@ -3430,14 +3469,15 @@ def apply_team_video_updates(
             if duration_column is not None
             else None
         )
-        print(
-            "[Apply Team Video Updates] Duration inputs:",
-            f"sheet={sheet_title!r}, column={duration_column}, cell={duration_cell}, "
-            f"value={duration_value!r}; source_sheet={source_sheet_title!r}, source_row={source_row_number}, "
-            f"source_team_cell={source_team_cell}, source_team_value={source_team_value!r}, "
-            f"source_duration_cell={source_duration_cell}, source_duration_value={source_duration_value!r}, "
-            f"normalized_source_duration={entry.duration!r}",
-        )
+        if console is not None:
+            console.log_info(
+                "[Apply Team Video Updates] Duration inputs: "
+                f"sheet={sheet_title!r}, column={duration_column}, cell={duration_cell}, "
+                f"value={duration_value!r}; source_sheet={source_sheet_title!r}, source_row={source_row_number}, "
+                f"source_team_cell={source_team_cell}, source_team_value={source_team_value!r}, "
+                f"source_duration_cell={source_duration_cell}, source_duration_value={source_duration_value!r}, "
+                f"normalized_source_duration={entry.duration!r}"
+            )
         if duration_column is not None and duration_value:
             assert duration_cell is not None
             sheet_updates.append(f"{duration_cell}: Duration {duration_value}")
@@ -3494,6 +3534,8 @@ def optimize_team_videos_for_sheet(
     spreadsheet_id: str,
     matches: Sequence[Mapping[str, Any]],
     importer: MatchScheduleImporterUI,
+    *,
+    console: Optional[ApplicationConsole] = None,
 ) -> Tuple[Dict[str, List[str]], List[str], str]:
     spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
         credentials, spreadsheet_id
@@ -3503,6 +3545,7 @@ def optimize_team_videos_for_sheet(
     )
 
     diagnostics: List[str] = []
+    active_console = console or getattr(importer, "console", None)
 
     video_dataset, video_diagnostics = extract_video_dataset_from_spreadsheet(spreadsheet)
     diagnostics.extend(video_diagnostics)
@@ -3526,7 +3569,7 @@ def optimize_team_videos_for_sheet(
         return {}, diagnostics, spreadsheet_title
 
     assignments, assignment_diagnostics = compute_team_video_assignments(
-        slots, match_countries, video_dataset
+        slots, match_countries, video_dataset, console=active_console
     )
     diagnostics.extend(assignment_diagnostics)
 
@@ -3537,7 +3580,7 @@ def optimize_team_videos_for_sheet(
         return {}, diagnostics, spreadsheet_title
 
     report, update_diagnostics = apply_team_video_updates(
-        credentials, spreadsheet_id, assignments
+        credentials, spreadsheet_id, assignments, console=active_console
     )
     diagnostics.extend(update_diagnostics)
 
