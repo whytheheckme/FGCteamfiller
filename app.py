@@ -19,10 +19,10 @@ import json
 import re
 import threading
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - optional dependency
     from google.oauth2.credentials import Credentials
@@ -194,15 +194,29 @@ def create_main_window() -> tk.Tk:
     console = ApplicationConsole(root)
     root.rowconfigure(2, weight=0)
     console.render(row=2)
-    credentials_manager, ros_document_loader = build_config_tab(config_frame, console)
-    build_tools_tab(tools_frame, console, credentials_manager, ros_document_loader)
+    (
+        credentials_manager,
+        ros_document_loader,
+        match_schedule_importer,
+    ) = build_config_tab(config_frame, console)
+    build_tools_tab(
+        tools_frame,
+        console,
+        credentials_manager,
+        ros_document_loader,
+        match_schedule_importer,
+    )
 
     return root
 
 
 def build_config_tab(
     parent: ttk.Frame, console: ApplicationConsole
-) -> Tuple["GoogleDriveCredentialsManager", "ROSDocumentLoaderUI"]:
+) -> Tuple[
+    "GoogleDriveCredentialsManager",
+    "ROSDocumentLoaderUI",
+    "MatchScheduleImporterUI",
+]:
     """Populate the Config tab with shared application settings."""
 
     parent.columnconfigure(0, weight=1)
@@ -251,9 +265,10 @@ def build_config_tab(
         font=("Helvetica", 14, "bold"),
     ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-    MatchScheduleImporterUI(match_schedule_frame, console).render(row=1)
+    match_schedule_importer = MatchScheduleImporterUI(match_schedule_frame, console)
+    match_schedule_importer.render(row=1)
 
-    return credentials_manager, ros_document_loader
+    return credentials_manager, ros_document_loader, match_schedule_importer
 
 
 def build_tools_tab(
@@ -261,6 +276,7 @@ def build_tools_tab(
     console: ApplicationConsole,
     credentials_manager: "GoogleDriveCredentialsManager",
     ros_document_loader: "ROSDocumentLoaderUI",
+    match_schedule_importer: "MatchScheduleImporterUI",
 ) -> None:
     """Populate the Tools tab with utilities that operate on ROS documents."""
 
@@ -294,7 +310,11 @@ def build_tools_tab(
     ).grid(row=0, column=0, columnspan=2, sticky="w")
 
     MatchNumberGeneratorUI(
-        match_frame, credentials_manager, ros_document_loader, console
+        match_frame,
+        credentials_manager,
+        ros_document_loader,
+        match_schedule_importer,
+        console,
     ).render(row=1)
 
 
@@ -310,6 +330,8 @@ class MatchScheduleImporterUI:
         self.field_number_var = tk.StringVar(value=self.FIELD_OPTIONS[0])
         self._status_var = tk.StringVar()
         self._matches: List[Dict[str, Any]] = []
+        self._imported_field: Optional[int] = None
+        self._matches_by_date: Dict[str, List[Dict[str, Any]]] = {}
 
     def render(self, row: int) -> None:
         ttk.Label(self.parent, text="Selected file:").grid(
@@ -386,6 +408,8 @@ class MatchScheduleImporterUI:
             return
 
         self._matches = matches
+        self._imported_field = field_number
+        self._matches_by_date = self._group_matches_by_date(matches, field_number)
         self.file_path_var.set(filename)
 
         field_counts = self._count_field_matches(matches, field_number)
@@ -430,6 +454,26 @@ class MatchScheduleImporterUI:
             counts[date_str] = counts.get(date_str, 0) + 1
         return dict(sorted(counts.items()))
 
+    def _group_matches_by_date(
+        self, matches: Sequence[Dict[str, Any]], field_number: int
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for match in matches:
+            if match.get("field") != field_number:
+                continue
+            scheduled_time = match.get("scheduledTime")
+            if not isinstance(scheduled_time, str):
+                continue
+            date_str = self._extract_date(scheduled_time)
+            if not date_str:
+                continue
+            grouped.setdefault(date_str, []).append(match)
+
+        for date, items in grouped.items():
+            items.sort(key=self._match_sort_key)
+
+        return {date: list(grouped[date]) for date in sorted(grouped)}
+
     def _extract_date(self, timestamp: str) -> Optional[str]:
         timestamp = timestamp.strip()
         if not timestamp:
@@ -443,6 +487,47 @@ class MatchScheduleImporterUI:
                 if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
                     return candidate
             return None
+
+    def _parse_datetime(self, timestamp: Any) -> Optional[datetime]:
+        if not isinstance(timestamp, str):
+            return None
+        normalized = timestamp.strip()
+        if not normalized:
+            return None
+        normalized = normalized.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+    def _match_sort_key(self, match: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+        scheduled_dt = self._parse_datetime(match.get("scheduledTime"))
+        if scheduled_dt is not None and scheduled_dt.tzinfo is not None:
+            scheduled_dt = scheduled_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        if scheduled_dt is not None:
+            scheduled_key: Tuple[Any, ...] = (
+                0,
+                scheduled_dt.toordinal(),
+                scheduled_dt.hour,
+                scheduled_dt.minute,
+                scheduled_dt.second,
+                scheduled_dt.microsecond,
+            )
+        else:
+            scheduled_key = (1, 0, 0, 0, 0, 0, 0)
+
+        match_number = self.extract_match_number(match)
+        fallback = (
+            match.get("matchKey")
+            or match.get("description")
+            or match.get("name")
+            or ""
+        )
+        return (
+            scheduled_key,
+            match_number if match_number is not None else float("inf"),
+            fallback,
+        )
 
     def _log_field_counts(self, counts: Dict[str, int], field_number: int) -> None:
         if not counts:
@@ -458,6 +543,56 @@ class MatchScheduleImporterUI:
         self._status_var.set(message)
         if log:
             self.console.log(f"[Match Schedule Importer] {message}")
+
+    def has_loaded_schedule(self) -> bool:
+        return bool(self._matches)
+
+    def get_imported_field_number(self) -> Optional[int]:
+        return self._imported_field
+
+    def get_matches_by_date_for_selected_field(self) -> List[Tuple[str, List[Dict[str, Any]]]]:
+        return [
+            (date, list(matches))
+            for date, matches in sorted(self._matches_by_date.items())
+        ]
+
+    def extract_match_number(self, match: Dict[str, Any]) -> Optional[int]:
+        for key in (
+            "matchNumber",
+            "match_number",
+            "matchNumberDisplay",
+            "matchnumber",
+            "matchNo",
+        ):
+            number = self._coerce_match_number(match.get(key))
+            if number is not None:
+                return number
+
+        fallback = match.get("matchKey") or match.get("match") or match.get("id")
+        if isinstance(fallback, str):
+            digits = re.findall(r"\d+", fallback)
+            if digits:
+                return int(digits[-1])
+
+        return None
+
+    def _coerce_match_number(self, value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            if stripped.isdigit():
+                return int(stripped)
+            digits = re.findall(r"\d+", stripped)
+            if digits:
+                return int(digits[-1])
+        return None
 
 class GoogleDriveCredentialsManager:
     """Handle selection and loading of Google Drive OAuth credentials."""
@@ -1161,11 +1296,13 @@ class MatchNumberGeneratorUI:
         parent: ttk.Frame,
         credentials_manager: GoogleDriveCredentialsManager,
         document_loader: ROSDocumentLoaderUI,
+        match_schedule_importer: MatchScheduleImporterUI,
         console: ApplicationConsole,
     ) -> None:
         self.parent = parent
         self.credentials_manager = credentials_manager
         self.document_loader = document_loader
+        self.match_schedule_importer = match_schedule_importer
         self.console = console
         self.current_document_var = tk.StringVar()
         self._status_var = tk.StringVar()
@@ -1219,6 +1356,32 @@ class MatchNumberGeneratorUI:
             self.set_status("Save a ROS document URL before generating match numbers.")
             return
 
+        if not self.match_schedule_importer.has_loaded_schedule():
+            messagebox.showerror(
+                "Match Schedule Required",
+                "Import a match schedule JSON before generating match numbers.",
+                parent=self.parent.winfo_toplevel(),
+            )
+            self.set_status("Import a match schedule JSON before generating match numbers.")
+            return
+
+        schedule_by_date = self.match_schedule_importer.get_matches_by_date_for_selected_field()
+        if not schedule_by_date:
+            field_number = self.match_schedule_importer.get_imported_field_number()
+            if field_number is None:
+                schedule_message = "The imported schedule does not include matches for the selected field."
+            else:
+                schedule_message = (
+                    f"The imported schedule does not include matches for Field {field_number}."
+                )
+            messagebox.showerror(
+                "Match Schedule Missing Matches",
+                schedule_message,
+                parent=self.parent.winfo_toplevel(),
+            )
+            self.set_status(schedule_message)
+            return
+
         credentials, error = self.credentials_manager.get_valid_credentials()
         if credentials is None:
             if error:
@@ -1264,6 +1427,7 @@ class MatchNumberGeneratorUI:
                     sheet_entries,
                     existing_numbers_found,
                     spreadsheet_title,
+                    schedule_by_date,
                 ),
             )
 
@@ -1281,6 +1445,7 @@ class MatchNumberGeneratorUI:
         sheet_entries: Sequence[Dict[str, Any]],
         existing_numbers_found: bool,
         spreadsheet_title: str,
+        schedule_by_date: Sequence[Tuple[str, Sequence[Dict[str, Any]]]],
     ) -> None:
         if spreadsheet_title:
             self.document_loader.set_document_name(spreadsheet_title)
@@ -1293,6 +1458,24 @@ class MatchNumberGeneratorUI:
                 self._log_diagnostics(diagnostics)
             self.set_status("No RANKING MATCH cells were updated.")
             return
+
+        match_numbers_by_sheet, mismatch_error, alignment_notes = (
+            self._derive_match_number_assignments(sheet_entries, schedule_by_date)
+        )
+        if mismatch_error:
+            if diagnostics:
+                self._log_diagnostics(diagnostics)
+            messagebox.showerror(
+                "Match Schedule Mismatch",
+                mismatch_error,
+                parent=self.parent.winfo_toplevel(),
+            )
+            self.console.log(f"[Match Number Generator] {mismatch_error}")
+            self.set_status("Match schedule does not match the ROS document.")
+            return
+
+        for note in alignment_notes:
+            self.console.log(f"[Match Number Generator] {note}")
 
         if existing_numbers_found:
             response = messagebox.askyesno(
@@ -1318,7 +1501,72 @@ class MatchNumberGeneratorUI:
             sheet_entries,
             renumber_all=renumber_all,
             initial_diagnostics=diagnostics,
+            match_numbers_by_sheet=match_numbers_by_sheet,
         )
+
+    def _derive_match_number_assignments(
+        self,
+        sheet_entries: Sequence[Dict[str, Any]],
+        schedule_by_date: Sequence[Tuple[str, Sequence[Dict[str, Any]]]],
+    ) -> Tuple[Dict[str, List[int]], Optional[str], List[str]]:
+        sheet_match_entries = [
+            entry for entry in sheet_entries if entry.get("matches")
+        ]
+        assignments: Dict[str, List[int]] = {}
+        alignment_notes: List[str] = []
+
+        schedule_count = len(schedule_by_date)
+        sheet_count = len(sheet_match_entries)
+
+        if schedule_count > sheet_count:
+            extra_date, extra_matches = schedule_by_date[sheet_count]
+            message = (
+                f"The number of matches ({len(extra_matches)}) in the schedule for {extra_date} "
+                "doesn't match the number of RANKING MATCH slots in "
+                "N/A (no sheet available)."
+            )
+            return {}, message, []
+
+        if sheet_count > schedule_count:
+            extra_sheet = sheet_match_entries[schedule_count]
+            sheet_name = str(extra_sheet.get("title", "Untitled"))
+            message = (
+                "The number of matches (0) in the schedule for N/A doesn't match the number "
+                f"of RANKING MATCH slots in {sheet_name}."
+            )
+            return {}, message, []
+
+        for (date, matches_for_date), sheet_entry in zip(
+            schedule_by_date, sheet_match_entries
+        ):
+            sheet_name = str(sheet_entry.get("title", "Untitled"))
+            sheet_matches: Sequence[Dict[str, Any]] = sheet_entry.get("matches", [])
+            schedule_total = len(matches_for_date)
+            slot_total = len(sheet_matches)
+            alignment_notes.append(
+                f"Verified {schedule_total} matches for {date} align with sheet {sheet_name}."
+            )
+
+            if schedule_total != slot_total:
+                message = (
+                    f"The number of matches ({schedule_total}) in the schedule for {date} "
+                    f"doesn't match the number of RANKING MATCH slots in {sheet_name}."
+                )
+                return {}, message, []
+
+            numbers: List[int] = []
+            for match in matches_for_date:
+                match_number = self.match_schedule_importer.extract_match_number(match)
+                if match_number is None:
+                    message = (
+                        f"The imported schedule is missing a match number for a match on {date}."
+                    )
+                    return {}, message, []
+                numbers.append(match_number)
+
+            assignments[sheet_name] = numbers
+
+        return assignments, None, alignment_notes
 
     def _apply_match_numbers(
         self,
@@ -1328,6 +1576,7 @@ class MatchNumberGeneratorUI:
         *,
         renumber_all: bool,
         initial_diagnostics: Sequence[str],
+        match_numbers_by_sheet: Dict[str, Sequence[int]],
     ) -> None:
         self.set_status("Applying ranking match numbers...")
 
@@ -1339,6 +1588,7 @@ class MatchNumberGeneratorUI:
                     sheet_entries,
                     renumber_all=renumber_all,
                     initial_diagnostics=initial_diagnostics,
+                    match_numbers_by_sheet=match_numbers_by_sheet,
                 )
             except Exception as exc:  # pragma: no cover - network interaction
                 message = f"Failed to update spreadsheet: {exc}"
@@ -1694,6 +1944,7 @@ def apply_ranking_match_number_updates(
     *,
     renumber_all: bool,
     initial_diagnostics: Optional[Sequence[str]] = None,
+    match_numbers_by_sheet: Optional[Mapping[str, Sequence[int]]] = None,
 ) -> Tuple[Dict[str, List[str]], List[str]]:
     """Apply numbering updates to the provided match metadata."""
 
@@ -1702,6 +1953,12 @@ def apply_ranking_match_number_updates(
     data_updates: List[Dict[str, Any]] = []
 
     counter = 1
+    provided_numbers: Dict[str, List[int]] = (
+        {
+            sheet: [int(number) for number in numbers]
+            for sheet, numbers in (match_numbers_by_sheet or {}).items()
+        }
+    )
     for entry in sorted(
         sheet_entries, key=lambda item: (int(item.get("index", 0)), item.get("title", ""))
     ):
@@ -1714,13 +1971,28 @@ def apply_ranking_match_number_updates(
 
         title = str(entry.get("title", "Untitled"))
         sheet_updates: List[Tuple[str, str]] = []
+        assigned_numbers = provided_numbers.get(title)
+        use_schedule_numbers = bool(assigned_numbers)
 
-        for match in sorted(matches, key=lambda item: (item["row_index"], item["column_index"])):
+        if use_schedule_numbers and len(assigned_numbers) != len(matches):
+            diagnostics.append(
+                f"{title}: Provided match numbers ({len(assigned_numbers)}) do not match the number of slots ({len(matches)})."
+            )
+            continue
+
+        sorted_matches = sorted(
+            matches, key=lambda item: (item["row_index"], item["column_index"])
+        )
+        for idx, match in enumerate(sorted_matches):
             row_index = int(match["row_index"])
             column_index = int(match["column_index"])
             cell_a1 = column_index_to_letter(column_index) + str(row_index + 1)
-            new_text = f"RANKING MATCH #{counter}"
-            counter += 1
+            if use_schedule_numbers:
+                match_number = assigned_numbers[idx]
+            else:
+                match_number = counter
+                counter += 1
+            new_text = f"RANKING MATCH #{match_number}"
 
             if renumber_all or match.get("original_text", "") != new_text:
                 sheet_updates.append((cell_a1, new_text))
