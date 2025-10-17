@@ -2882,7 +2882,19 @@ def compute_team_video_assignments(
     if not slot_candidates:
         return [], diagnostics
 
+    print("[Optimize Team Videos] Slot candidates and available country videos:")
+    for slot, codes in slot_candidates:
+        print(
+            "  - Sheet="
+            f"{slot.sheet_title!r}, match #{slot.match_number}, placeholder index {slot.placeholder_index}: "
+            f"{', '.join(sorted(set(codes)))}"
+        )
+
     unique_codes = sorted({code for _, codes in slot_candidates for code in codes})
+    print(
+        "[Optimize Team Videos] Unique country videos identified: "
+        f"{', '.join(unique_codes) if unique_codes else '(none)'}"
+    )
     if len(unique_codes) < len(slot_candidates):
         diagnostics.append(
             f"{len(slot_candidates)} placeholders reached assignment, but only {len(unique_codes)} unique country videos were available."
