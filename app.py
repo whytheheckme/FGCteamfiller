@@ -55,22 +55,71 @@ PLACEHOLDER_CODE_PATTERN = re.compile(
 RANKING_MATCH_NUMBER_PATTERN = re.compile(r"RANKING MATCH\s*#?\s*(\d+)", re.IGNORECASE)
 
 
-VIDEO_NUMBER_HEADER_ALIASES = {
-    "VIDEO #",
-    "VIDEO NO",
-    "VIDEO N°",
-    "VIDEO Nº",
-    "VIDEO NUMBER",
-    "VIDEO NUM",
-    "VIDEO N",
-}
+def _normalize_header_alias(text: str, *, uppercase: bool) -> str:
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if uppercase:
+        return normalized.upper()
+    return normalized.lower()
 
 
-DURATION_HEADER_ALIASES = {
-    "DURATION",
-    "DURACION",
-    "DURACIÓN",
-    "LENGTH",
+def _normalize_alias_set(aliases: Iterable[str], *, uppercase: bool) -> Set[str]:
+    return {_normalize_header_alias(alias, uppercase=uppercase) for alias in aliases}
+
+
+VIDEO_NUMBER_HEADER_ALIASES = _normalize_alias_set(
+    [
+        "VIDEO #",
+        "VIDEO NO",
+        "VIDEO N°",
+        "VIDEO Nº",
+        "VIDEO NUMBER",
+        "VIDEO NUM",
+        "VIDEO N",
+    ],
+    uppercase=True,
+)
+
+
+DURATION_HEADER_ALIASES = _normalize_alias_set(
+    [
+        "DURATION",
+        "DURACION",
+        "DURACIÓN",
+        "LENGTH",
+    ],
+    uppercase=True,
+)
+
+
+VIDEO_SHEET_HEADER_ALIASES: Dict[str, Set[str]] = {
+    "team": _normalize_alias_set(["team"], uppercase=False),
+    "value": _normalize_alias_set(["value", "score"], uppercase=False),
+    "video_id": _normalize_alias_set(["video id", "id", "video"], uppercase=False),
+    "time": _normalize_alias_set(["time", "start time", "scheduled"], uppercase=False),
+    "video_number": _normalize_alias_set(
+        [
+            "video #",
+            "video no",
+            "video nº",
+            "video n°",
+            "video number",
+            "video num",
+        ],
+        uppercase=False,
+    ),
+    "duration": _normalize_alias_set(["duration", "duración", "length"], uppercase=False),
+    "match": _normalize_alias_set(
+        [
+            "match",
+            "match #",
+            "match number",
+            "match no",
+            "match nº",
+            "match n°",
+        ],
+        uppercase=False,
+    ),
 }
 
 
@@ -583,6 +632,17 @@ class ApplicationConsole:
         self._text_widget: Optional[tk.Text] = None
 
     def render(self, row: int) -> None:
+        if hasattr(self.parent, "columnconfigure"):
+            try:
+                self.parent.columnconfigure(0, weight=1)
+            except tk.TclError:
+                pass
+        if hasattr(self.parent, "rowconfigure"):
+            try:
+                self.parent.rowconfigure(row, weight=1)
+            except tk.TclError:
+                pass
+
         frame = ttk.Frame(self.parent, padding=(16, 0, 16, 16))
         frame.grid(row=row, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
@@ -659,7 +719,12 @@ def create_main_window() -> tk.Tk:
     """Create and configure the main application window."""
     root = tk.Tk()
     root.title("FIRST Global 2025 Team Video Slotter")
-    root.geometry("800x600")
+    root.update_idletasks()
+    screen_width = root.winfo_screenwidth() or 1280
+    screen_height = root.winfo_screenheight() or 720
+    default_width = max(800, int(screen_width * 0.5))
+    default_height = max(600, int(screen_height * (2 / 3)))
+    root.geometry(f"{default_width}x{default_height}")
 
     # Configure a grid layout so the notebook expands with the window.
     root.columnconfigure(0, weight=1)
@@ -673,8 +738,15 @@ def create_main_window() -> tk.Tk:
     )
     title_label.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
 
-    notebook = ttk.Notebook(root)
-    notebook.grid(row=1, column=0, padx=16, pady=(16, 8), sticky="nsew")
+    paned = ttk.PanedWindow(root, orient="vertical")
+    paned.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
+
+    notebook_container = ttk.Frame(paned)
+    notebook_container.columnconfigure(0, weight=1)
+    notebook_container.rowconfigure(0, weight=1)
+
+    notebook = ttk.Notebook(notebook_container)
+    notebook.grid(row=0, column=0, sticky="nsew")
 
     team_videos_frame = ttk.Frame(notebook)
     config_frame = ttk.Frame(notebook)
@@ -688,9 +760,15 @@ def create_main_window() -> tk.Tk:
     notebook.add(config_frame, text="Config")
     notebook.add(tools_frame, text="Tools")
 
-    console = ApplicationConsole(root)
-    root.rowconfigure(2, weight=0)
-    console.render(row=2)
+    paned.add(notebook_container, weight=3)
+
+    console_container = ttk.Frame(paned)
+    console_container.columnconfigure(0, weight=1)
+    console_container.rowconfigure(0, weight=1)
+    paned.add(console_container, weight=1)
+
+    console = ApplicationConsole(console_container)
+    console.render(row=0)
     (
         credentials_manager,
         ros_document_loader,
@@ -2590,31 +2668,14 @@ def extract_video_dataset_from_spreadsheet(
     rows = _collect_sheet_rows(sheet_data)
     header_row_index: Optional[int] = None
     header_map: Dict[str, int] = {}
-    header_aliases: Dict[str, Set[str]] = {
-        "team": {"team"},
-        "value": {"value", "score"},
-        "video_id": {"video id", "id", "video"},
-        "time": {"time", "start time", "scheduled"},
-        "video_number": {
-            "video #",
-            "video no",
-            "video nº",
-            "video n°",
-            "video number",
-            "video num",
-        },
-        "duration": {"duration", "duración", "length"},
-        "match": {"match", "match #", "match number", "match no", "match nº", "match n°"},
-    }
-
     for row_index, columns in rows:
         detected: Dict[str, int] = {}
         for column_index, cell in columns.items():
             text = _extract_cell_text(cell)
             if not text:
                 continue
-            normalized = text.strip().lower()
-            for key, aliases in header_aliases.items():
+            normalized = _normalize_header_alias(text, uppercase=False)
+            for key, aliases in VIDEO_SHEET_HEADER_ALIASES.items():
                 if normalized in aliases:
                     detected[key] = column_index
         if "team" in detected and "value" in detected:
@@ -2760,7 +2821,7 @@ def collect_team_video_slots(
                     text = _extract_cell_text(cell)
                     if not text:
                         continue
-                    normalized = text.strip().upper()
+                    normalized = _normalize_header_alias(text, uppercase=True)
                     column_index = start_column + offset
                     row_entries.append((column_index, normalized))
             if not row_entries:
