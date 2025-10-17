@@ -1179,6 +1179,15 @@ class MatchNumberGeneratorUI:
                 f"{total_updates} cell{'s' if total_updates != 1 else ''} across "
                 f"{sheet_count} {sheet_word}."
             )
+            breakdowns = []
+            for sheet, entries in report.items():
+                entry_count = len(entries)
+                cell_word = "cell" if entry_count == 1 else "cells"
+                breakdowns.append(
+                    f"{entry_count} {cell_word} applied on sheet ({sheet})"
+                )
+            if breakdowns:
+                status_message += " " + ", ".join(breakdowns)
         else:
             status_message = "No RANKING MATCH cells were updated."
 
