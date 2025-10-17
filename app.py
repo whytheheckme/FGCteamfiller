@@ -17,7 +17,7 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - optional dependency
@@ -669,6 +669,11 @@ class ROSDocumentLoaderUI:
     def _on_url_var_changed(self, *_: Any) -> None:
         self._update_document_name(self.sheet_url_var.get())
 
+    def set_document_name(self, name: str) -> None:
+        text = (name or "").strip()
+        display = text if text else "Unknown"
+        self._set_document_name_display(display)
+
     def _update_document_name(self, url: str) -> None:
         if not url:
             display = "Not set"
@@ -680,6 +685,9 @@ class ROSDocumentLoaderUI:
                     name = f"Spreadsheet {spreadsheet_id}"
             display = name or "Unknown"
 
+        self._set_document_name_display(display)
+
+    def _set_document_name_display(self, display: str) -> None:
         self.document_name_var.set(display)
         for listener in list(self._name_listeners):
             try:
@@ -783,7 +791,7 @@ class ROSPlaceholderGeneratorUI:
 
         def _worker() -> None:
             try:
-                report, diagnostics = generate_placeholders_for_sheet(
+                report, diagnostics, spreadsheet_title = generate_placeholders_for_sheet(
                     credentials, spreadsheet_id
                 )
             except Exception as exc:  # pragma: no cover - network interaction
@@ -792,7 +800,7 @@ class ROSPlaceholderGeneratorUI:
                 return
 
             success_message = format_report(report, diagnostics)
-            self.parent.after(0, lambda: self.set_status(success_message))
+            self.parent.after(0, lambda: self._handle_placeholder_success(success_message, spreadsheet_title))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -800,6 +808,11 @@ class ROSPlaceholderGeneratorUI:
         self._status_var.set(message)
         if log:
             self.console.log(f"[ROS Placeholder Generator] {message}")
+
+    def _handle_placeholder_success(self, message: str, spreadsheet_title: str) -> None:
+        if spreadsheet_title:
+            self.document_loader.set_document_name(spreadsheet_title)
+        self.set_status(message)
 
 
 class MatchNumberGeneratorUI:
@@ -891,7 +904,7 @@ class MatchNumberGeneratorUI:
 
         def _worker() -> None:
             try:
-                report, diagnostics = generate_ranking_match_numbers(
+                spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
                     credentials, spreadsheet_id
                 )
             except Exception as exc:  # pragma: no cover - network interaction
@@ -899,19 +912,132 @@ class MatchNumberGeneratorUI:
                 self.parent.after(0, lambda: self.set_status(message))
                 return
 
-            success_message = format_report(
-                report,
-                diagnostics,
-                success_header="Ranking match numbers applied:",
-                empty_message="No RANKING MATCH cells were updated.",
+            sheet_entries, existing_numbers_found = inspect_ranking_match_numbers(
+                spreadsheet
             )
-            self.parent.after(0, lambda: self.set_status(success_message))
+            spreadsheet_title = str(
+                spreadsheet.get("properties", {}).get("title", "")
+            )
+            self.parent.after(
+                0,
+                lambda: self._handle_match_analysis(
+                    credentials,
+                    spreadsheet_id,
+                    sheet_entries,
+                    existing_numbers_found,
+                    spreadsheet_title,
+                ),
+            )
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def set_status(self, message: str, *, log: bool = True) -> None:
         self._status_var.set(message)
         if log:
+            self.console.log(f"[Match Number Generator] {message}")
+
+    def _handle_match_analysis(
+        self,
+        credentials: Credentials,
+        spreadsheet_id: str,
+        sheet_entries: Sequence[Dict[str, Any]],
+        existing_numbers_found: bool,
+        spreadsheet_title: str,
+    ) -> None:
+        if spreadsheet_title:
+            self.document_loader.set_document_name(spreadsheet_title)
+
+        total_matches = sum(len(entry.get("matches", [])) for entry in sheet_entries)
+        diagnostics = self._gather_analysis_diagnostics(sheet_entries)
+
+        if total_matches == 0:
+            if diagnostics:
+                self._log_diagnostics(diagnostics)
+            self.set_status("No RANKING MATCH cells were updated.")
+            return
+
+        if existing_numbers_found:
+            response = messagebox.askyesno(
+                "Existing Match Numbers Found",
+                "Existing Match Numbers found, do you want to renumber?",
+                parent=self.parent.winfo_toplevel(),
+            )
+            if not response:
+                if diagnostics:
+                    self._log_diagnostics(diagnostics)
+                self.console.log(
+                    "[Match Number Generator] Existing match numbers left unchanged by user request."
+                )
+                self.set_status("Existing match numbers left unchanged.")
+                return
+            renumber_all = True
+        else:
+            renumber_all = False
+
+        self._apply_match_numbers(
+            credentials,
+            spreadsheet_id,
+            sheet_entries,
+            renumber_all=renumber_all,
+            initial_diagnostics=diagnostics,
+        )
+
+    def _apply_match_numbers(
+        self,
+        credentials: Credentials,
+        spreadsheet_id: str,
+        sheet_entries: Sequence[Dict[str, Any]],
+        *,
+        renumber_all: bool,
+        initial_diagnostics: Sequence[str],
+    ) -> None:
+        self.set_status("Applying ranking match numbers...")
+
+        def _worker() -> None:
+            try:
+                report, diagnostics = apply_ranking_match_number_updates(
+                    credentials,
+                    spreadsheet_id,
+                    sheet_entries,
+                    renumber_all=renumber_all,
+                    initial_diagnostics=initial_diagnostics,
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to update spreadsheet: {exc}"
+                self.parent.after(0, lambda: self.set_status(message))
+                return
+
+            self.parent.after(
+                0,
+                lambda: self._handle_match_success(report, diagnostics),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _handle_match_success(
+        self, report: Dict[str, List[str]], diagnostics: Sequence[str]
+    ) -> None:
+        if diagnostics:
+            self._log_diagnostics(diagnostics)
+
+        success_message = format_report(
+            report,
+            (),
+            success_header="Ranking match numbers applied:",
+            empty_message="No RANKING MATCH cells were updated.",
+        )
+        self.set_status(success_message)
+
+    def _gather_analysis_diagnostics(
+        self, sheet_entries: Sequence[Dict[str, Any]]
+    ) -> List[str]:
+        diagnostics: List[str] = []
+        for entry in sheet_entries:
+            diagnostics.extend(entry.get("diagnostics", []))
+        return diagnostics
+
+    def _log_diagnostics(self, diagnostics: Sequence[str]) -> None:
+        for message in diagnostics:
             self.console.log(f"[Match Number Generator] {message}")
 
 def extract_spreadsheet_id(url: str) -> str:
@@ -1032,16 +1158,19 @@ def _fetch_spreadsheet(
 
 def generate_placeholders_for_sheet(
     credentials: Credentials, spreadsheet_id: str
-) -> Tuple[Dict[str, List[str]], List[str]]:
+) -> Tuple[Dict[str, List[str]], List[str], str]:
     """Scan the spreadsheet and replace placeholder cells.
 
     Returns the applied updates together with diagnostics describing how the
     spreadsheet was inspected (for example, which column contained the ``TASK``
-    header and sample colors that were evaluated).
+    header and sample colors that were evaluated), and the spreadsheet title.
     """
 
     spreadsheet, theme_supported, service = _fetch_spreadsheet(
         credentials, spreadsheet_id
+    )
+    spreadsheet_title = str(
+        spreadsheet.get("properties", {}).get("title", "")
     )
 
     updates: Dict[str, List[Tuple[str, str]]] = {}
@@ -1123,21 +1252,17 @@ def generate_placeholders_for_sheet(
             for sheet, entries in updates.items()
         },
         diagnostics,
+        spreadsheet_title,
     )
 
 
-def generate_ranking_match_numbers(
-    credentials: Credentials, spreadsheet_id: str
-) -> Tuple[Dict[str, List[str]], List[str]]:
-    """Number every RANKING MATCH cell found in the spreadsheet."""
+def inspect_ranking_match_numbers(
+    spreadsheet: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return per-sheet match metadata and whether numbering already exists."""
 
-    spreadsheet, _theme_supported, service = _fetch_spreadsheet(
-        credentials, spreadsheet_id
-    )
-
-    updates: Dict[str, List[Tuple[str, str]]] = {}
-    diagnostics: List[str] = []
-    data_updates: List[Dict[str, Any]] = []
+    sheets: List[Dict[str, Any]] = []
+    existing_numbers_found = False
 
     for sheet in spreadsheet.get("sheets", []):
         if not isinstance(sheet, dict):
@@ -1145,12 +1270,22 @@ def generate_ranking_match_numbers(
 
         properties = sheet.get("properties", {})
         title = properties.get("title", "Untitled")
+        index = int(properties.get("index", 0))
         sheet_data = sheet.get("data", [])
+
+        entry: Dict[str, Any] = {
+            "title": title,
+            "index": index,
+            "matches": [],
+            "diagnostics": [],
+        }
+
         if not sheet_data:
-            diagnostics.append(f"{title}: No data available to inspect.")
+            entry["diagnostics"].append(f"{title}: No data available to inspect.")
+            sheets.append(entry)
             continue
 
-        matches: List[Tuple[int, int, str]] = []
+        matches: List[Dict[str, Any]] = []
         for grid_data in sheet_data:
             if not isinstance(grid_data, dict):
                 continue
@@ -1173,27 +1308,69 @@ def generate_ranking_match_numbers(
                     if upper_normalized == "RANKING MATCH" or upper_normalized.startswith(
                         "RANKING MATCH #"
                     ):
-                        matches.append((row_index, column_index, normalized))
+                        matches.append(
+                            {
+                                "row_index": row_index,
+                                "column_index": column_index,
+                                "original_text": normalized,
+                            }
+                        )
+                        if upper_normalized.startswith("RANKING MATCH #"):
+                            existing_numbers_found = True
 
+        if matches:
+            entry["matches"] = matches
+        else:
+            entry["diagnostics"].append(f"{title}: No RANKING MATCH cells found.")
+
+        sheets.append(entry)
+
+    return sheets, existing_numbers_found
+
+
+def apply_ranking_match_number_updates(
+    credentials: Credentials,
+    spreadsheet_id: str,
+    sheet_entries: Sequence[Dict[str, Any]],
+    *,
+    renumber_all: bool,
+    initial_diagnostics: Optional[Sequence[str]] = None,
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Apply numbering updates to the provided match metadata."""
+
+    updates: Dict[str, List[Tuple[str, str]]] = {}
+    diagnostics: List[str] = list(initial_diagnostics or [])
+    data_updates: List[Dict[str, Any]] = []
+
+    counter = 1
+    for entry in sorted(
+        sheet_entries, key=lambda item: (int(item.get("index", 0)), item.get("title", ""))
+    ):
+        for message in entry.get("diagnostics", []):
+            diagnostics.append(message)
+
+        matches: Sequence[Dict[str, Any]] = entry.get("matches", [])
         if not matches:
-            diagnostics.append(f"{title}: No RANKING MATCH cells found.")
             continue
 
+        title = str(entry.get("title", "Untitled"))
         sheet_updates: List[Tuple[str, str]] = []
-        for counter, (row_index, column_index, original_text) in enumerate(
-            sorted(matches, key=lambda entry: (entry[0], entry[1])), start=1
-        ):
+
+        for match in sorted(matches, key=lambda item: (item["row_index"], item["column_index"])):
+            row_index = int(match["row_index"])
+            column_index = int(match["column_index"])
             cell_a1 = column_index_to_letter(column_index) + str(row_index + 1)
             new_text = f"RANKING MATCH #{counter}"
-            if original_text == new_text:
-                continue
-            sheet_updates.append((cell_a1, new_text))
-            data_updates.append(
-                {
-                    "range": single_cell_range(title, cell_a1),
-                    "values": [[new_text]],
-                }
-            )
+            counter += 1
+
+            if renumber_all or match.get("original_text", "") != new_text:
+                sheet_updates.append((cell_a1, new_text))
+                data_updates.append(
+                    {
+                        "range": single_cell_range(title, cell_a1),
+                        "values": [[new_text]],
+                    }
+                )
 
         diagnostics.append(
             f"{title}: Numbered {len(matches)} RANKING MATCH cell(s); "
@@ -1204,6 +1381,12 @@ def generate_ranking_match_numbers(
             updates[title] = sheet_updates
 
     if data_updates:
+        if build is None:
+            raise ModuleNotFoundError(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+
+        service = build("sheets", "v4", credentials=credentials)
         values_resource = service.spreadsheets().values()
         batch_update_kwargs = {
             "spreadsheetId": spreadsheet_id,
@@ -1223,6 +1406,27 @@ def generate_ranking_match_numbers(
             for sheet, entries in updates.items()
         },
         diagnostics,
+    )
+
+
+def generate_ranking_match_numbers(
+    credentials: Credentials, spreadsheet_id: str, *, renumber_all: bool = False
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Number every RANKING MATCH cell found in the spreadsheet."""
+
+    spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
+        credentials, spreadsheet_id
+    )
+    sheet_entries, _existing_numbers = inspect_ranking_match_numbers(spreadsheet)
+    initial_diagnostics: List[str] = []
+    for entry in sheet_entries:
+        initial_diagnostics.extend(entry.get("diagnostics", []))
+    return apply_ranking_match_number_updates(
+        credentials,
+        spreadsheet_id,
+        sheet_entries,
+        renumber_all=renumber_all,
+        initial_diagnostics=initial_diagnostics,
     )
 
 
