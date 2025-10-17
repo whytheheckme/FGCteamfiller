@@ -723,7 +723,7 @@ def create_main_window() -> tk.Tk:
     screen_width = root.winfo_screenwidth() or 1280
     screen_height = root.winfo_screenheight() or 720
     default_width = max(800, int(screen_width * 0.5))
-    default_height = max(600, int(screen_height * (2 / 3)))
+    default_height = max(600, int(screen_height * (3 / 4)))
     root.geometry(f"{default_width}x{default_height}")
 
     # Configure a grid layout so the notebook expands with the window.
@@ -2805,40 +2805,10 @@ def collect_team_video_slots(
         if task_column is None:
             continue
 
-        header_video_column: Optional[int] = None
-        header_duration_column: Optional[int] = None
-        for global_row_index in range(10):
-            row_entries: List[Tuple[int, str]] = []
-            for grid_data in sheet_data:
-                start_row = grid_data.get("startRow", 0)
-                start_column = grid_data.get("startColumn", 0)
-                relative_row_index = global_row_index - start_row
-                row_data = grid_data.get("rowData", [])
-                if relative_row_index < 0 or relative_row_index >= len(row_data):
-                    continue
-                row = row_data[relative_row_index]
-                for offset, cell in enumerate(row.get("values", [])):
-                    text = _extract_cell_text(cell)
-                    if not text:
-                        continue
-                    normalized = _normalize_header_alias(text, uppercase=True)
-                    column_index = start_column + offset
-                    row_entries.append((column_index, normalized))
-            if not row_entries:
-                continue
-            if any(normalized == "TASK" for _column_index, normalized in row_entries):
-                for column_index, normalized in row_entries:
-                    if (
-                        header_video_column is None
-                        and normalized in VIDEO_NUMBER_HEADER_ALIASES
-                    ):
-                        header_video_column = column_index
-                    if (
-                        header_duration_column is None
-                        and normalized in DURATION_HEADER_ALIASES
-                    ):
-                        header_duration_column = column_index
-                break
+        header_video_column: Optional[int] = task_column - 1 if task_column > 0 else None
+        header_duration_column: Optional[int] = (
+            task_column - 2 if task_column > 1 else None
+        )
 
         pending: List[Tuple[int, str]] = []
         for row_index, columns in _collect_sheet_rows(sheet_data):
