@@ -407,6 +407,23 @@ for line in COUNTRY_CODE_DATA.strip().splitlines():
             COUNTRY_NAME_TO_CODE[normalized] = iso3
 
 
+def normalize_country_code(code: str) -> Optional[str]:
+    """Return the ISO-3166 alpha-3 code for *code* if it can be resolved."""
+
+    if not code:
+        return None
+    candidate = code.strip().upper()
+    if not candidate:
+        return None
+    if re.fullmatch(r"[A-Z]{3}", candidate) and candidate in COUNTRY_CODE_TO_INFO:
+        return candidate
+    if re.fullmatch(r"[A-Z]{2}", candidate):
+        mapped = ISO2_TO_ISO3.get(candidate)
+        if mapped:
+            return mapped
+    return None
+
+
 def lookup_country_code(name: str) -> Optional[str]:
     normalized = _normalize_country_name(name)
     if not normalized:
@@ -432,6 +449,20 @@ def country_code_to_flag(code: str) -> str:
         return "".join(chr(0x1F1E6 + ord(char.upper()) - ord("A")) for char in iso2)
     except ValueError:
         return ""
+
+
+def _format_country_codes_for_log(codes: Sequence[str]) -> str:
+    if not codes:
+        return "(none)"
+    formatted: List[str] = []
+    for code in codes:
+        normalized = normalize_country_code(code) or code.strip().upper()
+        display = get_country_display_name(normalized)
+        if display:
+            formatted.append(f"{normalized} ({display})")
+        elif normalized:
+            formatted.append(normalized)
+    return ", ".join(formatted) if formatted else "(none)"
 
 
 def _extract_match_number_from_text(text: str) -> Optional[int]:
@@ -2684,12 +2715,7 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> List[str]:
         if depth > 6:
             return
         if isinstance(value, str):
-            candidate = value.strip().upper()
-            iso3_candidate: Optional[str] = None
-            if re.fullmatch(r"[A-Z]{2}", candidate):
-                iso3_candidate = ISO2_TO_ISO3.get(candidate)
-            elif re.fullmatch(r"[A-Z]{3}", candidate) and candidate in COUNTRY_CODE_TO_INFO:
-                iso3_candidate = candidate
+            iso3_candidate = normalize_country_code(value)
             if iso3_candidate:
                 codes.add(iso3_candidate)
             return
@@ -2857,6 +2883,10 @@ def compute_team_video_assignments(
     diagnostics: List[str] = []
     slot_candidates: List[Tuple[PlaceholderSlot, List[str]]] = []
 
+    logged_matches: Set[Tuple[str, int]] = set()
+    unresolved_logged: Set[Tuple[str, int]] = set()
+    missing_logged: Set[Tuple[str, int]] = set()
+
     for slot in slots:
         countries = match_countries.get(slot.match_number, [])
         if not countries:
@@ -2865,9 +2895,45 @@ def compute_team_video_assignments(
             )
             continue
 
+        normalized_codes: List[str] = []
+        unresolved_codes: List[str] = []
+        for code in countries:
+            iso3_code = normalize_country_code(code)
+            if iso3_code:
+                normalized_codes.append(iso3_code)
+            else:
+                unresolved_codes.append(code)
+
+        match_key = (slot.sheet_title, slot.match_number)
+
+        if unresolved_codes and match_key not in unresolved_logged:
+            formatted_unresolved = ", ".join(
+                sorted({str(code).strip() or "(blank)" for code in unresolved_codes})
+            )
+            diagnostics.append(
+                "Unrecognized country codes in schedule for match "
+                f"#{slot.match_number}: {formatted_unresolved}."
+            )
+            unresolved_logged.add(match_key)
+
+        normalized_codes = list(dict.fromkeys(normalized_codes))
+
+        if not normalized_codes:
+            diagnostics.append(
+                f"Match #{slot.match_number} on sheet {slot.sheet_title} has country entries, but none could be normalized."
+            )
+            continue
+
+        if match_key not in logged_matches:
+            print(
+                "[Optimize Team Videos] Match #"
+                f"{slot.match_number} schedule countries: {_format_country_codes_for_log(normalized_codes)}"
+            )
+            logged_matches.add(match_key)
+
         valid_codes: List[str] = []
         missing_entries: List[str] = []
-        for code in countries:
+        for code in normalized_codes:
             entry = find_video_entry_for_code(code, dataset)
             if entry is None:
                 missing_entries.append(code)
@@ -2875,8 +2941,15 @@ def compute_team_video_assignments(
                 valid_codes.append(code)
 
         if missing_entries:
-            diagnostics.append(
-                f"No videos found for countries {', '.join(sorted(missing_entries))} in match #{slot.match_number}."
+            formatted_missing = _format_country_codes_for_log(sorted(set(missing_entries)))
+            if match_key not in missing_logged:
+                diagnostics.append(
+                    f"No videos found for countries {formatted_missing} in match #{slot.match_number}."
+                )
+                missing_logged.add(match_key)
+            print(
+                "[Optimize Team Videos] Missing videos for match #"
+                f"{slot.match_number}: {formatted_missing}"
             )
 
         if not valid_codes:
