@@ -3286,6 +3286,10 @@ def apply_team_video_updates(
             video_number_cell = (
                 column_index_to_letter(video_number_column) + str(row_number)
             )
+            print(
+                "[Apply Team Video Updates] Writing video number:",
+                f"sheet={sheet_title!r}, cell={video_number_cell}, value={video_number_value}",
+            )
             sheet_updates.append(f"{video_number_cell}: Video Nº {video_number_value}")
             data_updates.append(
                 {
@@ -3300,6 +3304,10 @@ def apply_team_video_updates(
             duration_column = slot.task_column - 2
         if duration_column is not None and duration_value:
             duration_cell = column_index_to_letter(duration_column) + str(row_number)
+            print(
+                "[Apply Team Video Updates] Writing duration:",
+                f"sheet={sheet_title!r}, cell={duration_cell}, value={duration_value}",
+            )
             sheet_updates.append(f"{duration_cell}: Duration {duration_value}")
             data_updates.append(
                 {
