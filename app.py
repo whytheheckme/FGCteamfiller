@@ -364,7 +364,19 @@ ADDITIONAL_COUNTRY_ALIASES: Dict[str, Tuple[str, ...]] = {
     "VEN": ("Venezuela",),
     "VNM": ("Vietnam",),
     "XKX": ("Kosovo",),
+    "TUR": ("Türkiye", "Republic of Türkiye"),
 }
+
+
+COUNTRY_KEYWORD_MATCHES: Tuple[Tuple[str, str], ...] = (
+    ("hongkong", "HKG"),
+    ("palestin", "PSE"),
+    ("moldov", "MDA"),
+    ("micrones", "FSM"),
+    ("iran", "IRN"),
+    ("china", "CHN"),
+    ("turkiye", "TUR"),
+)
 
 
 def _normalize_country_name(name: str) -> str:
@@ -447,7 +459,13 @@ def lookup_country_code(name: str) -> Optional[str]:
     normalized = _normalize_country_name(name)
     if not normalized:
         return None
-    return COUNTRY_NAME_TO_CODE.get(normalized)
+    code = COUNTRY_NAME_TO_CODE.get(normalized)
+    if code:
+        return code
+    for keyword, keyword_code in COUNTRY_KEYWORD_MATCHES:
+        if keyword in normalized:
+            return keyword_code
+    return None
 
 
 def get_country_display_name(code: str) -> Optional[str]:
