@@ -2015,7 +2015,7 @@ class ROSPlaceholderGeneratorUI:
         else:
             status_message = "No matching placeholders were found."
 
-        self.console.log(f"[ROS Placeholder Generator] {console_message}")
+        self.console.log_info(f"[ROS Placeholder Generator] {console_message}")
         self.set_status(status_message, log=False)
 
 
@@ -2369,7 +2369,7 @@ class MatchNumberGeneratorUI:
         else:
             status_message = "No RANKING MATCH cells were updated."
 
-        self.console.log(f"[Match Number Generator] {console_message}")
+        self.console.log_info(f"[Match Number Generator] {console_message}")
         self.set_status(status_message, log=False)
 
     def _gather_analysis_diagnostics(
@@ -2562,7 +2562,7 @@ class OptimizeTeamVideosUI:
         else:
             status_message = "No TEAM VIDEO PLACEHOLDER entries were updated."
 
-        self.console.log(f"[Optimize Team Videos] {console_message}")
+        self.console.log_info(f"[Optimize Team Videos] {console_message}")
         self.set_status(status_message, log=False)
 
     def _log_diagnostics(self, diagnostics: Sequence[str]) -> None:
