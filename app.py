@@ -55,6 +55,25 @@ PLACEHOLDER_CODE_PATTERN = re.compile(
 RANKING_MATCH_NUMBER_PATTERN = re.compile(r"RANKING MATCH\s*#?\s*(\d+)", re.IGNORECASE)
 
 
+VIDEO_NUMBER_HEADER_ALIASES = {
+    "VIDEO #",
+    "VIDEO NO",
+    "VIDEO N°",
+    "VIDEO Nº",
+    "VIDEO NUMBER",
+    "VIDEO NUM",
+    "VIDEO N",
+}
+
+
+DURATION_HEADER_ALIASES = {
+    "DURATION",
+    "DURACION",
+    "DURACIÓN",
+    "LENGTH",
+}
+
+
 def strip_leading_flag_emoji(text: str) -> str:
     """Remove a leading emoji flag from *text*, if present."""
 
@@ -483,6 +502,8 @@ class VideoEntry:
     video_id: Optional[str]
     time: Optional[str]
     row_index: int
+    video_number: Optional[str]
+    duration: Optional[str]
 
 
 @dataclass
@@ -490,6 +511,10 @@ class VideoDataset:
     entries: List[VideoEntry]
     by_code: Dict[str, VideoEntry]
     by_normalized_name: Dict[str, VideoEntry]
+    sheet_title: str = "Videos"
+    video_number_column: Optional[int] = None
+    duration_column: Optional[int] = None
+    match_column: Optional[int] = None
 
 
 @dataclass
@@ -499,6 +524,16 @@ class PlaceholderSlot:
     task_column: int
     match_number: int
     placeholder_index: int
+    video_number_column: Optional[int] = None
+    duration_column: Optional[int] = None
+
+
+@dataclass
+class PlaceholderAssignment:
+    slot: PlaceholderSlot
+    country_code: str
+    video: VideoEntry
+    dataset: VideoDataset
 
 
 
@@ -2542,6 +2577,16 @@ def extract_video_dataset_from_spreadsheet(
         "value": {"value", "score"},
         "video_id": {"video id", "id", "video"},
         "time": {"time", "start time", "scheduled"},
+        "video_number": {
+            "video #",
+            "video no",
+            "video nº",
+            "video n°",
+            "video number",
+            "video num",
+        },
+        "duration": {"duration", "duración", "length"},
+        "match": {"match", "match #", "match number", "match no", "match nº", "match n°"},
     }
 
     for row_index, columns in rows:
@@ -2567,6 +2612,10 @@ def extract_video_dataset_from_spreadsheet(
     value_column = header_map["value"]
     video_id_column = header_map.get("video_id")
     time_column = header_map.get("time")
+    dataset.sheet_title = title
+    dataset.video_number_column = header_map.get("video_number")
+    dataset.duration_column = header_map.get("duration")
+    dataset.match_column = header_map.get("match")
 
     processed_rows = 0
 
@@ -2609,6 +2658,22 @@ def extract_video_dataset_from_spreadsheet(
                 if candidate:
                     time_value = candidate
 
+        video_number_value: Optional[str] = None
+        if dataset.video_number_column is not None:
+            number_cell = columns.get(dataset.video_number_column)
+            if number_cell is not None:
+                candidate = _extract_cell_text(number_cell).strip()
+                if candidate:
+                    video_number_value = candidate
+
+        duration_value: Optional[str] = None
+        if dataset.duration_column is not None:
+            duration_cell = columns.get(dataset.duration_column)
+            if duration_cell is not None:
+                candidate = _extract_cell_text(duration_cell).strip()
+                if candidate:
+                    duration_value = candidate
+
         entry = VideoEntry(
             team_name=cleaned_team if cleaned_team else team_text,
             normalized_name=normalized_name,
@@ -2616,6 +2681,8 @@ def extract_video_dataset_from_spreadsheet(
             video_id=video_id,
             time=time_value,
             row_index=row_index,
+            video_number=video_number_value,
+            duration=duration_value,
         )
         dataset.entries.append(entry)
         processed_rows += 1
@@ -2659,6 +2726,41 @@ def collect_team_video_slots(
         if task_column is None:
             continue
 
+        header_video_column: Optional[int] = None
+        header_duration_column: Optional[int] = None
+        for global_row_index in range(10):
+            row_entries: List[Tuple[int, str]] = []
+            for grid_data in sheet_data:
+                start_row = grid_data.get("startRow", 0)
+                start_column = grid_data.get("startColumn", 0)
+                relative_row_index = global_row_index - start_row
+                row_data = grid_data.get("rowData", [])
+                if relative_row_index < 0 or relative_row_index >= len(row_data):
+                    continue
+                row = row_data[relative_row_index]
+                for offset, cell in enumerate(row.get("values", [])):
+                    text = _extract_cell_text(cell)
+                    if not text:
+                        continue
+                    normalized = text.strip().upper()
+                    column_index = start_column + offset
+                    row_entries.append((column_index, normalized))
+            if not row_entries:
+                continue
+            if any(normalized == "TASK" for _column_index, normalized in row_entries):
+                for column_index, normalized in row_entries:
+                    if (
+                        header_video_column is None
+                        and normalized in VIDEO_NUMBER_HEADER_ALIASES
+                    ):
+                        header_video_column = column_index
+                    if (
+                        header_duration_column is None
+                        and normalized in DURATION_HEADER_ALIASES
+                    ):
+                        header_duration_column = column_index
+                break
+
         pending: List[Tuple[int, str]] = []
         for row_index, columns in _collect_sheet_rows(sheet_data):
             cell = columns.get(task_column)
@@ -2695,6 +2797,8 @@ def collect_team_video_slots(
                             task_column=task_column,
                             match_number=match_number,
                             placeholder_index=placeholder_index,
+                            video_number_column=header_video_column,
+                            duration_column=header_duration_column,
                         )
                     )
                 pending.clear()
@@ -3074,6 +3178,7 @@ def compute_team_video_assignments(
                 slot=slot,
                 country_code=code,
                 video=entry,
+                dataset=dataset,
             )
         )
 
@@ -3092,17 +3197,18 @@ def apply_team_video_updates(
         slot = assignment.slot
         entry = assignment.video
         code = assignment.country_code
-        flag = country_code_to_flag(code)
-        display_name = strip_leading_flag_emoji(entry.team_name)
-        if flag:
-            new_text = f"{flag} {display_name}".strip()
-        else:
-            new_text = display_name
+        display_name = get_country_display_name(code)
+        if not display_name:
+            display_name = strip_leading_flag_emoji(entry.team_name)
+        if not display_name:
+            display_name = code
+        new_text = display_name
 
         row_number = slot.row_index + 1
         task_cell = column_index_to_letter(slot.task_column) + str(row_number)
         sheet_title = slot.sheet_title
-        updates.setdefault(sheet_title, []).append(f"{task_cell}: {new_text}")
+        sheet_updates = updates.setdefault(sheet_title, [])
+        sheet_updates.append(f"{task_cell}: {new_text}")
         data_updates.append(
             {
                 "range": single_cell_range(sheet_title, task_cell),
@@ -3110,23 +3216,49 @@ def apply_team_video_updates(
             }
         )
 
-        if entry.time:
-            time_cell = column_index_to_letter(1) + str(row_number)
-            updates[sheet_title].append(f"{time_cell}: Time {entry.time}")
+        video_number_value = entry.video_number
+        video_number_column = slot.video_number_column
+        if video_number_column is None and slot.task_column > 0:
+            video_number_column = slot.task_column - 1
+        if video_number_column is not None and video_number_value:
+            video_number_cell = (
+                column_index_to_letter(video_number_column) + str(row_number)
+            )
+            sheet_updates.append(f"{video_number_cell}: Video Nº {video_number_value}")
             data_updates.append(
                 {
-                    "range": single_cell_range(sheet_title, time_cell),
-                    "values": [[entry.time]],
+                    "range": single_cell_range(sheet_title, video_number_cell),
+                    "values": [[video_number_value]],
                 }
             )
 
-        if entry.video_id:
-            video_cell = column_index_to_letter(2) + str(row_number)
-            updates[sheet_title].append(f"{video_cell}: Video ID {entry.video_id}")
+        duration_value = entry.duration or entry.time
+        duration_column = slot.duration_column
+        if duration_column is None and slot.task_column > 1:
+            duration_column = slot.task_column - 2
+        if duration_column is not None and duration_value:
+            duration_cell = column_index_to_letter(duration_column) + str(row_number)
+            sheet_updates.append(f"{duration_cell}: Duration {duration_value}")
             data_updates.append(
                 {
-                    "range": single_cell_range(sheet_title, video_cell),
-                    "values": [[entry.video_id]],
+                    "range": single_cell_range(sheet_title, duration_cell),
+                    "values": [[duration_value]],
+                }
+            )
+
+        dataset = assignment.dataset
+        match_column = dataset.match_column
+        if match_column is not None:
+            match_cell = column_index_to_letter(match_column) + str(entry.row_index + 1)
+            match_value = str(slot.match_number)
+            video_sheet_title = dataset.sheet_title
+            updates.setdefault(video_sheet_title, []).append(
+                f"{match_cell}: Match {match_value}"
+            )
+            data_updates.append(
+                {
+                    "range": single_cell_range(video_sheet_title, match_cell),
+                    "values": [[match_value]],
                 }
             )
 
