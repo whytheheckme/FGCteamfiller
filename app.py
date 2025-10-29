@@ -907,6 +907,7 @@ def build_team_videos_tab(
     fill_script = FillScriptUI(
         fill_script_frame,
         credentials_manager,
+        ros_document_loader,
         console,
     )
     fill_script.render(row=1)
@@ -2411,25 +2412,33 @@ class MatchNumberGeneratorUI:
 
 
 class FillScriptUI:
-    """User interface for scanning Google Docs for script block markers."""
+    """User interface for scanning documents for Fill Script block markers."""
 
     def __init__(
         self,
         parent: ttk.Frame,
         credentials_manager: "GoogleDriveCredentialsManager",
+        ros_document_loader: "ROSDocumentLoaderUI",
         console: ApplicationConsole,
     ) -> None:
         self.parent = parent
         self.credentials_manager = credentials_manager
+        self.ros_document_loader = ros_document_loader
         self.console = console
         self.document_url_var = tk.StringVar()
         self._status_var = tk.StringVar()
         self._block_selection_var = tk.StringVar()
         self._default_status = (
-            "Paste a Google Docs link and press Read to scan for block markers."
+            "Paste a Google Docs link or scan a ROS tab to find Fill Script blocks."
         )
         self._available_blocks: List[int] = []
         self.block_selector: Optional[ttk.Combobox] = None
+        self.sheet_selector: Optional[ttk.Combobox] = None
+        self.sheet_selection_var = tk.StringVar()
+        self._sheet_data_by_title: Dict[str, Sequence[dict]] = {}
+        self._current_ros_url = self.ros_document_loader.get_document_url()
+
+        self.ros_document_loader.add_listener(self._on_ros_document_changed)
 
     def render(self, row: int) -> None:
         self.parent.columnconfigure(1, weight=1)
@@ -2451,8 +2460,32 @@ class FillScriptUI:
         )
         read_button.grid(row=row + 1, column=1, sticky="e", pady=8)
 
-        ttk.Label(self.parent, text="Available Blocks:").grid(
+        ttk.Label(self.parent, text="ROS Source Tab:").grid(
             row=row + 2, column=0, sticky="w"
+        )
+
+        self.sheet_selector = ttk.Combobox(
+            self.parent,
+            textvariable=self.sheet_selection_var,
+            state="disabled",
+            values=(),
+        )
+        self.sheet_selector.grid(
+            row=row + 2, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
+        )
+        self.sheet_selector.bind(
+            "<<ComboboxSelected>>", lambda _event: self._on_sheet_selected()
+        )
+
+        scan_button = ttk.Button(
+            self.parent,
+            text="Scan ROS Tab",
+            command=self.scan_ros_tab,
+        )
+        scan_button.grid(row=row + 3, column=1, sticky="e", pady=(0, 8))
+
+        ttk.Label(self.parent, text="Available Blocks:").grid(
+            row=row + 4, column=0, sticky="w"
         )
 
         self.block_selector = ttk.Combobox(
@@ -2462,7 +2495,7 @@ class FillScriptUI:
             values=(),
         )
         self.block_selector.grid(
-            row=row + 2, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
+            row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
         )
 
         status_label = ttk.Label(
@@ -2471,9 +2504,29 @@ class FillScriptUI:
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w")
+        status_label.grid(row=row + 5, column=0, columnspan=2, sticky="w")
+
+        if not self._current_ros_url:
+            self.sheet_selection_var.set("")
+            if self.sheet_selector is not None:
+                self.sheet_selector.configure(values=(), state="disabled")
 
         self.set_status(self._default_status, log=False)
+
+    def _on_ros_document_changed(self, url: str) -> None:
+        self._current_ros_url = url.strip()
+        self._sheet_data_by_title.clear()
+        if self.sheet_selector is not None:
+            self.sheet_selector.configure(values=(), state="disabled")
+        self.sheet_selection_var.set("")
+
+    def _on_sheet_selected(self) -> None:
+        sheet_title = self.sheet_selection_var.get().strip()
+        if not sheet_title:
+            return
+        if sheet_title not in self._sheet_data_by_title:
+            return
+        self._scan_sheet_blocks(sheet_title)
 
     def read_document(self) -> None:
         url = self.document_url_var.get().strip()
@@ -2512,6 +2565,42 @@ class FillScriptUI:
             daemon=True,
         ).start()
 
+    def scan_ros_tab(self) -> None:
+        document_url = self._current_ros_url.strip()
+        if not document_url:
+            self.set_status("Save a ROS document URL before scanning tabs.")
+            return
+
+        spreadsheet_id = extract_spreadsheet_id(document_url)
+        if not spreadsheet_id:
+            self.set_status(
+                "Unable to determine spreadsheet ID from the saved ROS document URL."
+            )
+            return
+
+        credentials, error = self.credentials_manager.get_valid_credentials()
+        if credentials is None:
+            if error:
+                self.set_status(error)
+            else:
+                self.set_status("Load Google Drive credentials before scanning the ROS document.")
+            return
+
+        if build is None:
+            self.set_status(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+            return
+
+        selected_title = self.sheet_selection_var.get().strip()
+        self.set_status("Fetching ROS spreadsheet...")
+
+        threading.Thread(
+            target=self._scan_ros_tab_worker,
+            args=(credentials, spreadsheet_id, selected_title),
+            daemon=True,
+        ).start()
+
     def _read_document_worker(self, credentials: Credentials, document_id: str) -> None:
         try:
             service = build("drive", "v3", credentials=credentials, cache_discovery=False)
@@ -2531,6 +2620,41 @@ class FillScriptUI:
             text = str(data)
 
         self.parent.after(0, lambda: self._handle_document_text(text))
+
+    def _scan_ros_tab_worker(
+        self,
+        credentials: Credentials,
+        spreadsheet_id: str,
+        previously_selected: str,
+    ) -> None:
+        try:
+            spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
+                credentials, spreadsheet_id
+            )
+        except Exception as exc:  # pragma: no cover - network interaction
+            message = f"Failed to fetch ROS spreadsheet: {exc}"[:500]
+            self.parent.after(0, lambda: self.set_status(message))
+            return
+
+        sheet_entries: List[Tuple[int, str, Sequence[dict]]] = []
+        for sheet in spreadsheet.get("sheets", []) or []:
+            if not isinstance(sheet, dict):
+                continue
+            properties = sheet.get("properties", {}) or {}
+            title = properties.get("title")
+            if not isinstance(title, str) or not title.strip():
+                continue
+            index = properties.get("index")
+            if not isinstance(index, int):
+                index = 0
+            data = sheet.get("data", []) or []
+            sheet_entries.append((index, title, data))
+
+        sheet_entries.sort(key=lambda item: item[0])
+        self.parent.after(
+            0,
+            lambda: self._handle_ros_spreadsheet(sheet_entries, previously_selected.strip()),
+        )
 
     def _handle_document_text(self, text: str) -> None:
         blocks = find_fill_script_blocks(text)
@@ -2562,6 +2686,71 @@ class FillScriptUI:
         else:
             self.block_selector.configure(values=(), state="disabled")
             self._block_selection_var.set("")
+
+    def _handle_ros_spreadsheet(
+        self,
+        sheet_entries: Sequence[Tuple[int, str, Sequence[dict]]],
+        previously_selected: str,
+    ) -> None:
+        if not sheet_entries:
+            if self.sheet_selector is not None:
+                self.sheet_selector.configure(values=(), state="disabled")
+            self.sheet_selection_var.set("")
+            self._sheet_data_by_title.clear()
+            self._update_block_selector([])
+            self.set_status("The ROS spreadsheet does not contain any sheets.")
+            return
+
+        titles = [title for _index, title, _data in sheet_entries]
+        self._sheet_data_by_title = {title: data for _index, title, data in sheet_entries}
+
+        active_title = previously_selected if previously_selected in self._sheet_data_by_title else titles[0]
+        self.sheet_selection_var.set(active_title)
+
+        if self.sheet_selector is not None:
+            self.sheet_selector.configure(values=tuple(titles), state="readonly")
+
+        self.console.log(
+            f"[Fill Script] Loaded {len(titles)} tab{'s' if len(titles) != 1 else ''} from the ROS document."
+        )
+        self._scan_sheet_blocks(active_title)
+
+    def _scan_sheet_blocks(self, sheet_title: str) -> None:
+        sheet_data = self._sheet_data_by_title.get(sheet_title)
+        if sheet_data is None:
+            self._update_block_selector([])
+            self.set_status(f"No data returned for sheet {sheet_title!r}.")
+            return
+
+        blocks, task_column = find_fill_script_blocks_in_sheet(sheet_data)
+        self._available_blocks = blocks
+
+        if task_column is None:
+            self._update_block_selector([])
+            self.set_status(
+                f"{sheet_title}: No TASK column found within the first 10 rows."
+            )
+            self.console.log(f"[Fill Script] {sheet_title}: TASK column not located.")
+            return
+
+        self._update_block_selector(blocks)
+        if blocks:
+            block_summary = ", ".join(str(number) for number in blocks)
+            column_letter = column_index_to_letter(task_column)
+            self.console.log(
+                f"[Fill Script] {sheet_title}: Found block markers {block_summary} in column {column_letter}."
+            )
+            count = len(blocks)
+            self.set_status(
+                f"{sheet_title}: Found {count} block{'s' if count != 1 else ''} with matching start and end tags."
+            )
+        else:
+            self.console.log(
+                f"[Fill Script] {sheet_title}: No matching block markers found in the TASK column."
+            )
+            self.set_status(
+                f"{sheet_title}: No matching block tags were found in the TASK column."
+            )
 
     def set_status(self, message: str, *, log: bool = True) -> None:
         self._status_var.set(message)
@@ -2784,6 +2973,41 @@ def find_fill_script_blocks(text: str) -> List[int]:
             matching_numbers.append(number)
 
     return matching_numbers
+
+
+def find_fill_script_blocks_in_sheet(
+    sheet_data: Sequence[dict],
+) -> Tuple[List[int], Optional[int]]:
+    """Return matching block numbers and the TASK column index for a sheet."""
+
+    task_column = find_task_column(sheet_data)
+    if task_column is None:
+        return [], None
+
+    starts: Dict[int, List[int]] = {}
+    ends: Dict[int, List[int]] = {}
+
+    for row_index, cell in _iter_column_cells(sheet_data, task_column):
+        text = _extract_cell_text(cell)
+        if not text:
+            continue
+
+        for match in BLOCK_START_PATTERN.finditer(text):
+            number = int(match.group(1))
+            starts.setdefault(number, []).append(row_index)
+
+        for match in BLOCK_END_PATTERN.finditer(text):
+            number = int(match.group(1))
+            ends.setdefault(number, []).append(row_index)
+
+    matching_numbers: List[int] = []
+    for number in sorted(starts.keys() & ends.keys()):
+        start_rows = starts[number]
+        end_rows = ends[number]
+        if any(start < end for start in start_rows for end in end_rows):
+            matching_numbers.append(number)
+
+    return matching_numbers, task_column
 
 
 def extract_spreadsheet_id(url: str) -> str:
