@@ -14,6 +14,7 @@ if importlib.util.find_spec("tkinter") is None:  # pragma: no cover - import-tim
         "On macOS with Homebrew Python, install it with 'brew install python-tk@3.13'."
     )
 
+import difflib
 import itertools
 import json
 import math
@@ -599,6 +600,82 @@ def _extract_match_number_from_text(text: str) -> Optional[int]:
         return None
 
 
+def _normalize_video_number(value: str) -> Optional[str]:
+    digits = re.findall(r"\d+", value)
+    if not digits:
+        return None
+    number = digits[-1].lstrip("0")
+    return number or (digits[-1] if digits[-1] else None)
+
+
+def _normalize_booth_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = normalized.upper()
+    normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _match_booth_interview(key: str, rows: Sequence[BoothInterviewRow]) -> Optional[BoothInterviewRow]:
+    normalized_key = _normalize_booth_key(key)
+    if not normalized_key:
+        return None
+
+    for row in rows:
+        if row.normalized_key == normalized_key:
+            return row
+
+    best_row: Optional[BoothInterviewRow] = None
+    best_score = 0.0
+    for row in rows:
+        score = difflib.SequenceMatcher(None, normalized_key, row.normalized_key).ratio()
+        if score > best_score:
+            best_score = score
+            best_row = row
+
+    if best_row and best_score >= 0.7:
+        return best_row
+    return None
+
+
+def _extract_host_number(value: str) -> Optional[str]:
+    if not value:
+        return None
+    match = re.search(r"(\d+)", value)
+    if match:
+        number = match.group(1).lstrip("0")
+        return number or match.group(1)
+    return None
+
+
+def find_host_column(sheet_data: Sequence[dict], task_column: int) -> Optional[int]:
+    rows = _collect_sheet_rows(sheet_data)
+    header_row_index: Optional[int] = None
+    for row_index, columns in rows:
+        cell = columns.get(task_column)
+        if not cell:
+            continue
+        text = _extract_cell_text(cell)
+        if text.strip().upper() == "TASK":
+            header_row_index = row_index
+            break
+
+    search_limit = header_row_index + 3 if header_row_index is not None else 5
+    for row_index, columns in rows:
+        if row_index > search_limit:
+            break
+        for column_index, cell in columns.items():
+            if column_index <= task_column:
+                continue
+            text = _extract_cell_text(cell)
+            if not text:
+                continue
+            normalized = _normalize_header_alias(text, uppercase=True)
+            if "HOST" in normalized or "TALENT" in normalized:
+                return column_index
+
+    return None
+
+
 @dataclass
 class VideoEntry:
     team_name: str
@@ -643,6 +720,27 @@ class PlaceholderAssignment:
     country_code: str
     video: VideoEntry
     dataset: VideoDataset
+
+
+@dataclass
+class ScriptLine:
+    text: str
+    bold: bool = False
+    alignment: str = "left"
+
+
+@dataclass
+class VideoScriptRow:
+    number: str
+    label: str
+    script: str
+
+
+@dataclass
+class BoothInterviewRow:
+    key: str
+    script: str
+    normalized_key: str
 
 
 
@@ -3177,6 +3275,74 @@ def _collect_sheet_rows(sheet_data: Sequence[dict]) -> List[Tuple[int, Dict[int,
     return sorted(rows.items())
 
 
+def extract_script_resources_from_videos_tab(
+    spreadsheet: Mapping[str, Any]
+) -> Tuple[Dict[str, VideoScriptRow], Dict[str, VideoScriptRow], List[BoothInterviewRow], List[str]]:
+    diagnostics: List[str] = []
+    videos_sheet: Optional[Mapping[str, Any]] = None
+    for sheet in spreadsheet.get("sheets", []):
+        properties = sheet.get("properties", {}) if isinstance(sheet, Mapping) else {}
+        title = str(properties.get("title", ""))
+        if title.strip().lower() == "videos":
+            videos_sheet = sheet
+            break
+
+    if videos_sheet is None:
+        diagnostics.append("Videos tab not found in the ROS spreadsheet.")
+        return {}, {}, [], diagnostics
+
+    sheet_data = videos_sheet.get("data", []) if isinstance(videos_sheet, Mapping) else []
+    if not sheet_data:
+        diagnostics.append("Videos tab does not contain any data.")
+        return {}, {}, [], diagnostics
+
+    rows = _collect_sheet_rows(sheet_data)
+    team_by_number: Dict[str, VideoScriptRow] = {}
+    feature_by_number: Dict[str, VideoScriptRow] = {}
+    booth_rows: List[BoothInterviewRow] = []
+
+    for _row_index, columns in rows:
+        team_number_text = _extract_cell_text(columns.get(0, {}))
+        team_label = _extract_cell_text(columns.get(1, {}))
+        team_script = _extract_cell_text(columns.get(5, {}))
+
+        team_number = _normalize_video_number(team_number_text) if team_number_text else None
+        if team_number and team_script:
+            entry = VideoScriptRow(number=team_number, label=team_label or team_number_text, script=team_script)
+            team_by_number.setdefault(team_number, entry)
+
+        feature_number_text = _extract_cell_text(columns.get(8, {}))
+        feature_label = _extract_cell_text(columns.get(9, {}))
+        feature_script = _extract_cell_text(columns.get(14, {}))
+
+        feature_number = _normalize_video_number(feature_number_text) if feature_number_text else None
+        if feature_number and feature_script:
+            entry = VideoScriptRow(
+                number=feature_number,
+                label=feature_label or feature_number_text,
+                script=feature_script,
+            )
+            feature_by_number.setdefault(feature_number, entry)
+
+        booth_key = _extract_cell_text(columns.get(16, {}))
+        booth_script = _extract_cell_text(columns.get(19, {}))
+        if booth_key and booth_script:
+            normalized_key = _normalize_booth_key(booth_key)
+            if normalized_key:
+                booth_rows.append(
+                    BoothInterviewRow(key=booth_key, script=booth_script, normalized_key=normalized_key)
+                )
+
+    if not team_by_number:
+        diagnostics.append("Videos tab did not include any team video script entries (columns A/B/F).")
+    if not feature_by_number:
+        diagnostics.append("Videos tab did not include any feature video script entries (columns I/J/O).")
+    if not booth_rows:
+        diagnostics.append("Videos tab did not include any booth interview script entries (columns Q/T).")
+
+    return team_by_number, feature_by_number, booth_rows, diagnostics
+
+
 def extract_video_dataset_from_spreadsheet(
     spreadsheet: Mapping[str, Any]
 ) -> Tuple[VideoDataset, List[str]]:
@@ -4396,6 +4562,175 @@ def find_task_column(sheet_data: Sequence[dict]) -> Optional[int]:
                 if isinstance(value, str) and value.strip().upper() == "TASK":
                     return start_column + offset
     return None
+
+
+def build_script_lines_for_block(
+    spreadsheet: Mapping[str, Any], sheet_title: str, block_number: int
+) -> Tuple[List[ScriptLine], List[str]]:
+    diagnostics: List[str] = []
+    script_lines: List[ScriptLine] = []
+
+    target_sheet: Optional[Mapping[str, Any]] = None
+    for sheet in spreadsheet.get("sheets", []):
+        properties = sheet.get("properties", {}) if isinstance(sheet, Mapping) else {}
+        title = str(properties.get("title", ""))
+        if title.strip().lower() == sheet_title.strip().lower():
+            target_sheet = sheet
+            break
+
+    if target_sheet is None:
+        diagnostics.append(f"Sheet '{sheet_title}' was not found in the ROS spreadsheet.")
+        return script_lines, diagnostics
+
+    sheet_data = target_sheet.get("data", []) if isinstance(target_sheet, Mapping) else []
+    if not sheet_data:
+        diagnostics.append(f"Sheet '{sheet_title}' does not contain any data.")
+        return script_lines, diagnostics
+
+    task_column = find_task_column(sheet_data)
+    if task_column is None:
+        diagnostics.append(f"Sheet '{sheet_title}' is missing a TASK column.")
+        return script_lines, diagnostics
+
+    host_column = find_host_column(sheet_data, task_column)
+
+    start_row: Optional[int] = None
+    end_row: Optional[int] = None
+    for row_index, cell in _iter_column_cells(sheet_data, task_column):
+        text = _extract_cell_text(cell)
+        if not text:
+            continue
+        for match in BLOCK_START_PATTERN.finditer(text):
+            if int(match.group(1)) == block_number:
+                start_row = row_index
+        if start_row is not None:
+            for match in BLOCK_END_PATTERN.finditer(text):
+                if int(match.group(1)) == block_number and row_index >= start_row:
+                    end_row = row_index
+                    break
+        if start_row is not None and end_row is not None:
+            break
+
+    if start_row is None or end_row is None or end_row <= start_row:
+        diagnostics.append(
+            f"Block {block_number} markers were not found or are mismatched in sheet '{sheet_title}'."
+        )
+        return script_lines, diagnostics
+
+    rows = _collect_sheet_rows(sheet_data)
+    team_lookup, feature_lookup, booth_rows, video_diagnostics = extract_script_resources_from_videos_tab(
+        spreadsheet
+    )
+    diagnostics.extend(video_diagnostics)
+
+    eligible_found = False
+
+    for row_index, columns in rows:
+        if row_index <= start_row or row_index >= end_row:
+            continue
+
+        task_cell = columns.get(task_column)
+        task_text = _extract_cell_text(task_cell) if task_cell else ""
+        task_upper = task_text.strip().upper()
+
+        video_text = ""
+        if task_column > 0:
+            video_cell = columns.get(task_column - 1)
+            video_text = _extract_cell_text(video_cell) if video_cell else ""
+
+        host_text = ""
+        if host_column is not None:
+            host_cell = columns.get(host_column)
+            host_text = _extract_cell_text(host_cell) if host_cell else ""
+        else:
+            fallback_cell = columns.get(task_column + 1)
+            host_text = _extract_cell_text(fallback_cell) if fallback_cell else ""
+
+        host_number = _extract_host_number(host_text)
+        host_line_text = f"HOST {host_number}" if host_number else "HOST #"
+
+        if task_upper.startswith("RANKING MATCH"):
+            match_number = _extract_match_number_from_text(task_text)
+            if match_number is not None:
+                header = f"<Ranking Match {match_number}>"
+            else:
+                diagnostics.append(
+                    f"Row {row_index + 1}: Unable to parse ranking match number from '{task_text}'."
+                )
+                header = "<Ranking Match>"
+            script_lines.append(ScriptLine(text=header))
+            script_lines.append(ScriptLine(text=""))
+            script_lines.append(ScriptLine(text="[Match Commentary]"))
+            script_lines.append(ScriptLine(text=""))
+            eligible_found = True
+            continue
+
+        if task_upper.startswith("FIELD INTERVIEW"):
+            script_lines.append(ScriptLine(text="[Field Interview]"))
+            script_lines.append(ScriptLine(text=""))
+            eligible_found = True
+            continue
+
+        if task_upper.startswith("PIT INTERVIEW"):
+            script_lines.append(ScriptLine(text="[Pit Interview]"))
+            script_lines.append(ScriptLine(text=""))
+            eligible_found = True
+            continue
+
+        if task_upper.startswith("BOOTH INTERVIEW"):
+            match = re.match(r"BOOTH\s+INTERVIEW\s*[:\-]?\s*(.*)", task_text, flags=re.IGNORECASE)
+            booth_label = match.group(1).strip() if match and match.group(1) else task_text.strip()
+            display_label = booth_label if booth_label else "Booth Interview"
+            script_lines.append(ScriptLine(text=f"[{display_label} - See Below]"))
+            script_lines.append(ScriptLine(text=""))
+            script_lines.append(ScriptLine(text=host_line_text, bold=True, alignment="center"))
+            booth_entry = _match_booth_interview(booth_label, booth_rows)
+            if booth_entry is None:
+                diagnostics.append(
+                    f"Row {row_index + 1}: Booth interview '{display_label}' not found in Videos tab."
+                )
+            else:
+                script_lines.append(
+                    ScriptLine(text=booth_entry.script.strip(), alignment="center")
+                )
+                script_lines.append(ScriptLine(text=""))
+            eligible_found = True
+            continue
+
+        video_number = _normalize_video_number(video_text) if video_text else None
+        if not video_number:
+            continue
+
+        entry = team_lookup.get(video_number)
+        if entry is not None:
+            script_lines.append(ScriptLine(text=f"<Team {entry.label} Video>"))
+            script_lines.append(ScriptLine(text=""))
+            script_lines.append(ScriptLine(text=host_line_text, bold=True, alignment="center"))
+            script_lines.append(ScriptLine(text=entry.script.strip(), alignment="center"))
+            script_lines.append(ScriptLine(text=""))
+            eligible_found = True
+            continue
+
+        entry = feature_lookup.get(video_number)
+        if entry is not None:
+            script_lines.append(ScriptLine(text=f"<Feature Video {entry.label}>"))
+            script_lines.append(ScriptLine(text=""))
+            script_lines.append(ScriptLine(text=host_line_text, bold=True, alignment="center"))
+            script_lines.append(ScriptLine(text=entry.script.strip(), alignment="center"))
+            script_lines.append(ScriptLine(text=""))
+            eligible_found = True
+            continue
+
+        diagnostics.append(
+            f"Row {row_index + 1}: Video number '{video_text}' not found in Videos tab columns A or I."
+        )
+
+    if not eligible_found:
+        diagnostics.append(
+            f"Block {block_number} in sheet '{sheet_title}' did not contain any eligible rows."
+        )
+
+    return script_lines, diagnostics
 
 
 def find_placeholder_cells(
