@@ -63,6 +63,11 @@ PLACEHOLDER_CODE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 RANKING_MATCH_NUMBER_PATTERN = re.compile(r"RANKING MATCH\s*#?\s*(\d+)", re.IGNORECASE)
+GOOGLE_DOCUMENT_ID_PATTERN = re.compile(
+    r"/document/(?:u/\d+/)?d/([a-zA-Z0-9_-]+)", re.IGNORECASE
+)
+BLOCK_START_PATTERN = re.compile(r"\[Block\s+(\d+)\s+start\]", re.IGNORECASE)
+BLOCK_END_PATTERN = re.compile(r"\[Block\s+(\d+)\s+end\]", re.IGNORECASE)
 
 
 def _normalize_header_alias(text: str, *, uppercase: bool) -> str:
@@ -885,6 +890,26 @@ def build_team_videos_tab(
         console,
     )
     optimizer.render(row=1)
+
+    separator = ttk.Separator(container, orient="horizontal")
+    separator.grid(row=4, column=0, columnspan=2, sticky="ew", pady=12)
+
+    fill_script_frame = ttk.Frame(container, padding=(0, 0, 0, 0))
+    fill_script_frame.grid(row=5, column=0, columnspan=2, sticky="nsew")
+    fill_script_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(
+        fill_script_frame,
+        text="Fill Script",
+        font=("Helvetica", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+    fill_script = FillScriptUI(
+        fill_script_frame,
+        credentials_manager,
+        console,
+    )
+    fill_script.render(row=1)
 
 
 def build_config_tab(
@@ -2385,6 +2410,165 @@ class MatchNumberGeneratorUI:
             self.console.log(f"[Match Number Generator] {message}")
 
 
+class FillScriptUI:
+    """User interface for scanning Google Docs for script block markers."""
+
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        credentials_manager: "GoogleDriveCredentialsManager",
+        console: ApplicationConsole,
+    ) -> None:
+        self.parent = parent
+        self.credentials_manager = credentials_manager
+        self.console = console
+        self.document_url_var = tk.StringVar()
+        self._status_var = tk.StringVar()
+        self._block_selection_var = tk.StringVar()
+        self._default_status = (
+            "Paste a Google Docs link and press Read to scan for block markers."
+        )
+        self._available_blocks: List[int] = []
+        self.block_selector: Optional[ttk.Combobox] = None
+
+    def render(self, row: int) -> None:
+        self.parent.columnconfigure(1, weight=1)
+
+        ttk.Label(self.parent, text="Google Docs link:").grid(
+            row=row, column=0, sticky="w", pady=(8, 0)
+        )
+
+        link_entry = ttk.Entry(
+            self.parent,
+            textvariable=self.document_url_var,
+        )
+        link_entry.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        read_button = ttk.Button(
+            self.parent,
+            text="Read",
+            command=self.read_document,
+        )
+        read_button.grid(row=row + 1, column=1, sticky="e", pady=8)
+
+        ttk.Label(self.parent, text="Available Blocks:").grid(
+            row=row + 2, column=0, sticky="w"
+        )
+
+        self.block_selector = ttk.Combobox(
+            self.parent,
+            textvariable=self._block_selection_var,
+            state="disabled",
+            values=(),
+        )
+        self.block_selector.grid(
+            row=row + 2, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
+        )
+
+        status_label = ttk.Label(
+            self.parent,
+            textvariable=self._status_var,
+            wraplength=520,
+            justify="left",
+        )
+        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w")
+
+        self.set_status(self._default_status, log=False)
+
+    def read_document(self) -> None:
+        url = self.document_url_var.get().strip()
+        if not url:
+            self.set_status("Enter a Google Docs link before reading.")
+            return
+
+        document_id = extract_document_id(url)
+        if not document_id:
+            self.set_status(
+                "Unable to determine document ID from the provided link."
+            )
+            return
+
+        credentials, error = self.credentials_manager.get_valid_credentials()
+        if credentials is None:
+            if error:
+                self.set_status(error)
+            else:
+                self.set_status(
+                    "Load Google Drive credentials before reading the script document."
+                )
+            return
+
+        if build is None:
+            self.set_status(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+            return
+
+        self.set_status("Fetching Google Doc...")
+
+        threading.Thread(
+            target=self._read_document_worker,
+            args=(credentials, document_id),
+            daemon=True,
+        ).start()
+
+    def _read_document_worker(self, credentials: Credentials, document_id: str) -> None:
+        try:
+            service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+            data = (
+                service.files()
+                .export(fileId=document_id, mimeType="text/plain")
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover - network interaction
+            message = f"Failed to fetch Google Doc: {exc}"[:500]
+            self.parent.after(0, lambda: self.set_status(message))
+            return
+
+        if isinstance(data, bytes):
+            text = data.decode("utf-8", errors="replace")
+        else:
+            text = str(data)
+
+        self.parent.after(0, lambda: self._handle_document_text(text))
+
+    def _handle_document_text(self, text: str) -> None:
+        blocks = find_fill_script_blocks(text)
+        self._available_blocks = blocks
+
+        if blocks:
+            self._update_block_selector(blocks)
+            block_summary = ", ".join(str(number) for number in blocks)
+            self.console.log(f"[Fill Script] Found block markers: {block_summary}")
+            count = len(blocks)
+            self.set_status(
+                f"Found {count} block{'s' if count != 1 else ''} with matching start and end tags."
+            )
+        else:
+            self._update_block_selector([])
+            if text.strip():
+                self.set_status("No matching block tags were found in the document.")
+            else:
+                self.set_status("The document was fetched but appears to be empty.")
+
+    def _update_block_selector(self, blocks: Sequence[int]) -> None:
+        if not self.block_selector:
+            return
+
+        if blocks:
+            values = tuple(str(number) for number in blocks)
+            self.block_selector.configure(values=values, state="readonly")
+            self._block_selection_var.set(values[0])
+        else:
+            self.block_selector.configure(values=(), state="disabled")
+            self._block_selection_var.set("")
+
+    def set_status(self, message: str, *, log: bool = True) -> None:
+        self._status_var.set(message)
+        if log:
+            self.console.log(f"[Fill Script] {message}")
+
+
 class OptimizeTeamVideosUI:
     """User interface wrapper for the team video optimization tool."""
 
@@ -2568,6 +2752,39 @@ class OptimizeTeamVideosUI:
     def _log_diagnostics(self, diagnostics: Sequence[str]) -> None:
         for message in diagnostics:
             self.console.log(f"[Optimize Team Videos] {message}")
+
+
+def extract_document_id(url: str) -> str:
+    """Extract the Google Docs document ID from a URL."""
+
+    match = GOOGLE_DOCUMENT_ID_PATTERN.search(url)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def find_fill_script_blocks(text: str) -> List[int]:
+    """Return block numbers that include matching start and end markers."""
+
+    starts: Dict[int, List[int]] = {}
+    for match in BLOCK_START_PATTERN.finditer(text):
+        number = int(match.group(1))
+        starts.setdefault(number, []).append(match.start())
+
+    ends: Dict[int, List[int]] = {}
+    for match in BLOCK_END_PATTERN.finditer(text):
+        number = int(match.group(1))
+        ends.setdefault(number, []).append(match.start())
+
+    matching_numbers: List[int] = []
+    for number in sorted(starts.keys() & ends.keys()):
+        start_positions = starts[number]
+        end_positions = ends[number]
+        if any(start < end for start in start_positions for end in end_positions):
+            matching_numbers.append(number)
+
+    return matching_numbers
+
 
 def extract_spreadsheet_id(url: str) -> str:
     """Extract the spreadsheet ID from a Google Sheets URL."""
