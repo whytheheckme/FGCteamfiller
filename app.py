@@ -4375,10 +4375,13 @@ def compute_team_video_assignments(
 
         valid_codes: List[str] = []
         missing_entries: List[str] = []
+        missing_value_codes: List[str] = []
         for code in normalized_codes:
             entry = find_video_entry_for_code(code, dataset)
             if entry is None:
                 missing_entries.append(code)
+            elif entry.value is None:
+                missing_value_codes.append(code)
             else:
                 valid_codes.append(code)
 
@@ -4400,6 +4403,20 @@ def compute_team_video_assignments(
                 f"Match #{slot.match_number} on sheet {slot.sheet_title} has no assignable countries with videos."
             )
             continue
+
+        if missing_value_codes:
+            formatted_missing_value = _format_country_codes_for_log(
+                sorted(set(missing_value_codes))
+            )
+            diagnostics.append(
+                "Countries "
+                f"{formatted_missing_value} in match #{slot.match_number} lack value scores and were ignored."
+            )
+            if console is not None:
+                console.log_info(
+                    "[Optimize Team Videos] Ignored countries without value scores for match #"
+                    f"{slot.match_number}: {formatted_missing_value}"
+                )
 
         slot_candidates.append((slot, valid_codes))
 
@@ -4428,23 +4445,29 @@ def compute_team_video_assignments(
             f"{len(slot_candidates)} placeholders reached assignment, but only {len(unique_codes)} unique country videos were available."
         )
         diagnostics.append(
-            "Fewer unique country videos are available than placeholders; some placeholders may remain unassigned."
+            "Fewer unique country videos are available than placeholders; duplicates may be required."
         )
 
     inf_cost = 1e12
-    missing_value_penalty = 1e6
+    duplicate_trigger_cost = 1e11
     cost_matrix: List[List[float]] = []
+
+    column_codes: List[Optional[str]] = list(unique_codes)
+    if len(column_codes) < len(slot_candidates):
+        column_codes.extend([None] * (len(slot_candidates) - len(column_codes)))
 
     for slot, codes in slot_candidates:
         row: List[float] = []
-        for code in unique_codes:
-            if code in codes:
-                entry = find_video_entry_for_code(code, dataset)
-                if entry is None:
+        for column_code in column_codes:
+            if column_code is None:
+                row.append(duplicate_trigger_cost + slot.placeholder_index * 1e-6)
+            elif column_code in codes:
+                entry = find_video_entry_for_code(column_code, dataset)
+                if entry is None or entry.value is None:
                     row.append(inf_cost)
                     continue
-                value = entry.value if entry.value is not None else missing_value_penalty
-                cost = float(value) + slot.placeholder_index * 1e-6
+                value = float(entry.value)
+                cost = value + slot.placeholder_index * 1e-6
                 row.append(cost)
             else:
                 row.append(inf_cost)
@@ -4461,38 +4484,100 @@ def compute_team_video_assignments(
         )
         return [], diagnostics
 
-    results: List[PlaceholderAssignment] = []
-    assigned_codes: Set[str] = set()
+    results_by_index: Dict[int, PlaceholderAssignment] = {}
+    unmatched_indices: List[int] = []
+    assigned_counts: Dict[str, int] = {}
+
     for row_index, (slot, _codes) in enumerate(slot_candidates):
         column_index = assignments[row_index] if row_index < len(assignments) else -1
-        if column_index < 0 or column_index >= len(unique_codes):
+        if column_index < 0 or column_index >= len(column_codes):
             diagnostics.append(
                 f"No available country could be assigned to placeholder before match #{slot.match_number} on sheet {slot.sheet_title}."
             )
+            unmatched_indices.append(row_index)
             continue
         cost = cost_matrix[row_index][column_index]
         if cost >= inf_cost:
             diagnostics.append(
                 f"No valid assignment found for placeholder before match #{slot.match_number} on sheet {slot.sheet_title}."
             )
+            unmatched_indices.append(row_index)
             continue
-        code = unique_codes[column_index]
-        if code in assigned_codes:
+        code = column_codes[column_index]
+        if code is None:
+            unmatched_indices.append(row_index)
             continue
         entry = find_video_entry_for_code(code, dataset)
-        if entry is None:
+        if entry is None or entry.value is None:
+            unmatched_indices.append(row_index)
             continue
-        assigned_codes.add(code)
-        results.append(
-            PlaceholderAssignment(
-                slot=slot,
-                country_code=code,
-                video=entry,
-                dataset=dataset,
-            )
+        if assigned_counts.get(code, 0) > 0:
+            unmatched_indices.append(row_index)
+            continue
+        assigned_counts[code] = assigned_counts.get(code, 0) + 1
+        results_by_index[row_index] = PlaceholderAssignment(
+            slot=slot,
+            country_code=code,
+            video=entry,
+            dataset=dataset,
         )
 
-    return results, diagnostics
+    duplicate_messages: List[str] = []
+    for row_index in unmatched_indices:
+        slot, codes = slot_candidates[row_index]
+        candidate_entries: List[Tuple[int, float, str, VideoEntry]] = []
+        for code in codes:
+            entry = find_video_entry_for_code(code, dataset)
+            if entry is None or entry.value is None:
+                continue
+            assigned_count = assigned_counts.get(code, 0)
+            candidate_entries.append((assigned_count, float(entry.value), code, entry))
+        if not candidate_entries:
+            diagnostics.append(
+                f"Unable to assign any video to placeholder before match #{slot.match_number} on sheet {slot.sheet_title}, even after allowing duplicates."
+            )
+            continue
+        candidate_entries.sort(key=lambda item: (item[0], item[1], item[2]))
+        assigned_count, _value, code, entry = candidate_entries[0]
+        assigned_counts[code] = assigned_count + 1
+        if assigned_count > 0:
+            duplicate_messages.append(
+                f"Duplicate assignment: country {code} reused for match #{slot.match_number}."
+            )
+        results_by_index[row_index] = PlaceholderAssignment(
+            slot=slot,
+            country_code=code,
+            video=entry,
+            dataset=dataset,
+        )
+
+    duplicates_by_code: Dict[str, List[int]] = {}
+    ordered_results: List[PlaceholderAssignment] = []
+    for index, (slot, _codes) in enumerate(slot_candidates):
+        assignment = results_by_index.get(index)
+        if assignment is None:
+            continue
+        ordered_results.append(assignment)
+        duplicates_by_code.setdefault(assignment.country_code, []).append(
+            assignment.slot.match_number
+        )
+
+    duplicate_codes = {
+        code: sorted(set(matches))
+        for code, matches in duplicates_by_code.items()
+        if len(matches) > 1
+    }
+    if duplicate_codes and console is not None:
+        for code, matches in sorted(duplicate_codes.items()):
+            match_text = ", ".join(str(match) for match in matches)
+            console.log_warn(
+                "[Optimize Team Videos] Duplicate video required: "
+                f"{code} assigned to matches {match_text}."
+            )
+    if duplicate_messages:
+        diagnostics.extend(sorted(duplicate_messages))
+
+    return ordered_results, diagnostics
 
 
 def apply_team_video_updates(
@@ -4504,6 +4589,8 @@ def apply_team_video_updates(
 ) -> Tuple[Dict[str, List[str]], List[str]]:
     updates: Dict[str, List[str]] = {}
     data_updates: List[Dict[str, Any]] = []
+    match_numbers_by_entry: Dict[Tuple[str, int], List[int]] = {}
+    entry_context_by_key: Dict[Tuple[str, int], Tuple[VideoEntry, VideoDataset]] = {}
 
     for assignment in assignments:
         slot = assignment.slot
@@ -4561,6 +4648,12 @@ def apply_team_video_updates(
             else entry.duration or ""
         )
 
+        entry_key = (dataset.sheet_title, entry.row_index)
+        matches = match_numbers_by_entry.setdefault(entry_key, [])
+        if slot.match_number not in matches:
+            matches.append(slot.match_number)
+        entry_context_by_key[entry_key] = (entry, dataset)
+
         video_number_value = (entry.video_number or "").strip()
         video_number_column = slot.video_number_column
         if video_number_column is None and slot.task_column > 0:
@@ -4617,20 +4710,24 @@ def apply_team_video_updates(
                 }
             )
 
+    for entry_key, match_numbers in match_numbers_by_entry.items():
+        entry, dataset = entry_context_by_key[entry_key]
         match_column = dataset.match_column
-        if match_column is not None:
-            match_cell = column_index_to_letter(match_column) + str(entry.row_index + 1)
-            match_value = str(slot.match_number)
-            video_sheet_title = dataset.sheet_title
-            updates.setdefault(video_sheet_title, []).append(
-                f"{match_cell}: Match {match_value}"
-            )
-            data_updates.append(
-                {
-                    "range": single_cell_range(video_sheet_title, match_cell),
-                    "values": [[match_value]],
-                }
-            )
+        if match_column is None:
+            continue
+        match_cell = column_index_to_letter(match_column) + str(entry.row_index + 1)
+        unique_matches = sorted(set(match_numbers))
+        match_value = ", ".join(str(number) for number in unique_matches)
+        video_sheet_title = dataset.sheet_title
+        updates.setdefault(video_sheet_title, []).append(
+            f"{match_cell}: Match {match_value}"
+        )
+        data_updates.append(
+            {
+                "range": single_cell_range(video_sheet_title, match_cell),
+                "values": [[match_value]],
+            }
+        )
 
     if data_updates:
         if build is None:
