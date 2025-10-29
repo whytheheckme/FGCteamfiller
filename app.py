@@ -3053,11 +3053,11 @@ class FillScriptUI:
         self.console.log(log_message)
 
         self._apply_block_text_to_document(
-            doc_block_number, formatted_lines, sheet_title
+            doc_block_number, script_lines, sheet_title
         )
 
     def _apply_block_text_to_document(
-        self, block_number: int, formatted_lines: Sequence[str], sheet_title: str
+        self, block_number: int, script_lines: Sequence[ScriptLine], sheet_title: str
     ) -> None:
         document_id = self._document_id
         if not document_id:
@@ -3086,9 +3086,25 @@ class FillScriptUI:
             )
             return
 
-        block_text = "\n".join(formatted_lines).replace("\r\n", "\n")
+        normalized_lines = [
+            line.text.replace("\r\n", "\n").replace("\r", "\n")
+            for line in script_lines
+        ]
+        block_text = "\n".join(normalized_lines)
+        line_ranges: List[Tuple[int, int, ScriptLine]] = []
+        position = 0
+        for index, line in enumerate(script_lines):
+            text = normalized_lines[index]
+            start = position
+            end = start + len(text)
+            line_ranges.append((start, end, line))
+            position = end
+            if index < len(normalized_lines) - 1:
+                position += 1
+        newline_added = False
         if block_text and not block_text.endswith("\n"):
             block_text += "\n"
+            newline_added = True
 
         status_message = (
             f"Inserting generated script text for block {block_number} into the Google Doc..."
@@ -3142,6 +3158,7 @@ class FillScriptUI:
                         }
                     }
                 )
+            style_requests: List[Dict[str, Any]] = []
             if block_text:
                 requests.append(
                     {
@@ -3151,6 +3168,52 @@ class FillScriptUI:
                         }
                     }
                 )
+                if line_ranges:
+                    for index, (relative_start, relative_end, line) in enumerate(
+                        line_ranges
+                    ):
+                        abs_start = start_index + relative_start
+                        abs_end = start_index + relative_end
+                        paragraph_end = abs_end
+                        if index < len(line_ranges) - 1:
+                            paragraph_end += 1
+                        elif newline_added:
+                            paragraph_end += 1
+
+                        alignment = line.alignment.strip().upper()
+                        if (
+                            alignment
+                            and alignment != "LEFT"
+                            and paragraph_end > abs_start
+                        ):
+                            style_requests.append(
+                                {
+                                    "updateParagraphStyle": {
+                                        "range": {
+                                            "startIndex": abs_start,
+                                            "endIndex": paragraph_end,
+                                        },
+                                        "paragraphStyle": {"alignment": alignment},
+                                        "fields": "alignment",
+                                    }
+                                }
+                            )
+
+                        if abs_end > abs_start:
+                            style_requests.append(
+                                {
+                                    "updateTextStyle": {
+                                        "range": {
+                                            "startIndex": abs_start,
+                                            "endIndex": abs_end,
+                                        },
+                                        "textStyle": {"bold": bool(line.bold)},
+                                        "fields": "bold",
+                                    }
+                                }
+                            )
+            if style_requests:
+                requests.extend(style_requests)
 
             if not requests:
 
@@ -5053,6 +5116,7 @@ def build_script_lines_for_block(
     diagnostics.extend(video_diagnostics)
 
     eligible_found = False
+    fallback_host_numbers = itertools.cycle(("1", "2", "3"))
 
     for row_index, columns in rows:
         if row_index <= start_row or row_index >= end_row:
@@ -5076,7 +5140,9 @@ def build_script_lines_for_block(
             host_text = _extract_cell_text(fallback_cell) if fallback_cell else ""
 
         host_number = _extract_host_number(host_text)
-        host_line_text = f"HOST {host_number}" if host_number else "HOST #"
+        if not host_number:
+            host_number = next(fallback_host_numbers)
+        host_line_text = f"HOST {host_number}"
 
         if task_upper.startswith("RANKING MATCH"):
             match_number = _extract_match_number_from_text(task_text)
