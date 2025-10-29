@@ -1455,6 +1455,7 @@ class GoogleDriveCredentialsManager:
     SCOPES = [
         "https://www.googleapis.com/auth/drive.readonly",
         "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/documents",
     ]
     STORAGE_PATH = Path.home() / ".fgc_team_filler" / "google_credentials.json"
     USER_POLL_INTERVAL_MS = 60_000
@@ -1505,6 +1506,14 @@ class GoogleDriveCredentialsManager:
 
         if not credentials.valid:
             message = "Stored credentials are invalid. Please re-authorize."
+            if log_status:
+                self.set_status(message)
+            return None, message
+
+        if not self._credentials_have_required_scopes(credentials):
+            message = (
+                "Stored credentials are missing Google Docs access. Please re-authorize."
+            )
             if log_status:
                 self.set_status(message)
             return None, message
@@ -1567,6 +1576,22 @@ class GoogleDriveCredentialsManager:
                 listener(self._credentials)
             except Exception:
                 continue
+
+    def _credentials_have_required_scopes(self, credentials: Credentials) -> bool:
+        try:
+            has_scopes = credentials.has_scopes(self.SCOPES)  # type: ignore[attr-defined]
+        except Exception:
+            has_scopes = None
+
+        if has_scopes is not None:
+            return bool(has_scopes)
+
+        scopes = getattr(credentials, "scopes", None)
+        if isinstance(scopes, Sequence):
+            scope_set = {str(scope) for scope in scopes}
+            return all(scope in scope_set for scope in self.SCOPES)
+
+        return False
 
     def select_credentials_file(self) -> None:
         filename = filedialog.askopenfilename(
@@ -1651,6 +1676,11 @@ class GoogleDriveCredentialsManager:
                 return
 
         if credentials.valid:
+            if not self._credentials_have_required_scopes(credentials):
+                self.set_status(
+                    "Saved credentials are missing Google Docs access. Please re-authorize."
+                )
+                return
             self._credentials = credentials
             self.credentials_path_var.set(str(storage_path))
             self.set_status("Loaded saved credentials. You're ready to go.")
@@ -3137,7 +3167,33 @@ class FillScriptUI:
                     documentId=document_id, body={"requests": requests}
                 ).execute()
             except Exception as exc:  # pragma: no cover - network interaction
-                message = f"Failed to update Google Doc: {exc}"[:500]
+                base_message = f"Failed to update Google Doc: {exc}"
+                hint = ""
+                error_text = str(exc).lower()
+                if "insufficient authentication scopes" in error_text:
+                    hint = (
+                        " Your Google credentials do not grant access to Google Docs. "
+                        "Open the Drive Credentials tab and click Authorize to sign in again."
+                    )
+                elif HttpError is not None and isinstance(exc, HttpError):
+                    try:
+                        details = getattr(exc, "error_details", None)
+                        if isinstance(details, list):
+                            for detail in details:
+                                if (
+                                    isinstance(detail, Mapping)
+                                    and detail.get("reason") == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+                                ):
+                                    hint = (
+                                        " Your Google credentials do not grant access to Google Docs. "
+                                        "Open the Drive Credentials tab and click Authorize to sign in again."
+                                    )
+                                    break
+                    except Exception:
+                        pass
+                message = base_message[:500]
+                if hint:
+                    message = f"{message}{hint}"
 
                 def _handle_update_failure() -> None:
                     self.set_status(
