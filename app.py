@@ -907,6 +907,7 @@ def build_team_videos_tab(
     fill_script = FillScriptUI(
         fill_script_frame,
         credentials_manager,
+        ros_document_loader,
         console,
     )
     fill_script.render(row=1)
@@ -2411,25 +2412,41 @@ class MatchNumberGeneratorUI:
 
 
 class FillScriptUI:
-    """User interface for scanning Google Docs for script block markers."""
+    """User interface for scanning Google Docs and ROS sheets for block markers."""
 
     def __init__(
         self,
         parent: ttk.Frame,
         credentials_manager: "GoogleDriveCredentialsManager",
+        ros_document_loader: "ROSDocumentLoaderUI",
         console: ApplicationConsole,
     ) -> None:
         self.parent = parent
         self.credentials_manager = credentials_manager
+        self.ros_document_loader = ros_document_loader
         self.console = console
         self.document_url_var = tk.StringVar()
         self._status_var = tk.StringVar()
         self._block_selection_var = tk.StringVar()
+        self._ros_sheet_var = tk.StringVar()
+        self._ros_block_selection_var = tk.StringVar()
         self._default_status = (
             "Paste a Google Docs link and press Read to scan for block markers."
         )
         self._available_blocks: List[int] = []
+        self._ros_available_blocks: List[int] = []
         self.block_selector: Optional[ttk.Combobox] = None
+        self.ros_sheet_selector: Optional[ttk.Combobox] = None
+        self.ros_block_selector: Optional[ttk.Combobox] = None
+        self._ros_sheet_values: Tuple[str, ...] = ()
+        self._ros_spreadsheet_id: Optional[str] = None
+        self._ros_loaded_spreadsheet_id: Optional[str] = None
+        self._ros_sheet_map: Dict[str, Mapping[str, Any]] = {}
+        self._ros_loading = False
+
+        self.ros_document_loader.add_listener(self._on_ros_document_url_changed)
+        self.credentials_manager.add_credentials_listener(self._on_credentials_changed)
+        self._on_ros_document_url_changed(self.ros_document_loader.get_document_url())
 
     def render(self, row: int) -> None:
         self.parent.columnconfigure(1, weight=1)
@@ -2465,13 +2482,42 @@ class FillScriptUI:
             row=row + 2, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
         )
 
+        ttk.Label(self.parent, text="ROS Tab:").grid(
+            row=row + 3, column=0, sticky="w"
+        )
+
+        self.ros_sheet_selector = ttk.Combobox(
+            self.parent,
+            textvariable=self._ros_sheet_var,
+            state="disabled",
+            values=self._ros_sheet_values,
+        )
+        self.ros_sheet_selector.grid(
+            row=row + 3, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
+        )
+        self.ros_sheet_selector.bind("<<ComboboxSelected>>", self._on_ros_sheet_selected)
+
+        ttk.Label(self.parent, text="ROS Available Blocks:").grid(
+            row=row + 4, column=0, sticky="w"
+        )
+
+        self.ros_block_selector = ttk.Combobox(
+            self.parent,
+            textvariable=self._ros_block_selection_var,
+            state="disabled",
+            values=(),
+        )
+        self.ros_block_selector.grid(
+            row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
+        )
+
         status_label = ttk.Label(
             self.parent,
             textvariable=self._status_var,
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w")
+        status_label.grid(row=row + 5, column=0, columnspan=2, sticky="w")
 
         self.set_status(self._default_status, log=False)
 
@@ -2567,6 +2613,214 @@ class FillScriptUI:
         self._status_var.set(message)
         if log:
             self.console.log(f"[Fill Script] {message}")
+
+    def _on_ros_document_url_changed(self, url: str) -> None:
+        spreadsheet_id = extract_spreadsheet_id(url)
+        if spreadsheet_id != self._ros_spreadsheet_id:
+            self._ros_spreadsheet_id = spreadsheet_id
+            self._ros_loaded_spreadsheet_id = None
+            self._ros_sheet_map = {}
+            self._update_ros_sheet_selector(())
+            self._update_ros_block_selector([])
+        if spreadsheet_id:
+            self._maybe_refresh_ros_tabs()
+
+    def _on_credentials_changed(self, credentials: Optional[Credentials]) -> None:
+        if credentials is None:
+            return
+        if (
+            self._ros_spreadsheet_id
+            and self._ros_loaded_spreadsheet_id != self._ros_spreadsheet_id
+        ):
+            self._maybe_refresh_ros_tabs()
+
+    def _maybe_refresh_ros_tabs(self) -> None:
+        if self._ros_loading:
+            return
+        spreadsheet_id = self._ros_spreadsheet_id
+        if not spreadsheet_id:
+            return
+        if build is None:
+            self.set_status(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'."
+            )
+            return
+        credentials, error = self.credentials_manager.get_valid_credentials()
+        if credentials is None:
+            if error:
+                self.set_status(error)
+            else:
+                self.set_status(
+                    "Load Google Drive credentials before reading the ROS spreadsheet."
+                )
+            return
+
+        self._ros_loading = True
+        self.set_status("Loading ROS tabs...")
+
+        def _worker() -> None:
+            try:
+                spreadsheet, _theme_supported, _service = _fetch_spreadsheet(
+                    credentials, spreadsheet_id
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to load ROS spreadsheet: {exc}"[:500]
+                self.parent.after(
+                    0,
+                    lambda: self._handle_ros_spreadsheet_error(message, spreadsheet_id),
+                )
+                return
+
+            self.parent.after(
+                0,
+                lambda: self._handle_ros_spreadsheet_success(
+                    spreadsheet, spreadsheet_id
+                ),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _handle_ros_spreadsheet_error(
+        self, message: str, spreadsheet_id: str
+    ) -> None:
+        self._ros_loading = False
+        if spreadsheet_id != self._ros_spreadsheet_id:
+            return
+        self.set_status(message)
+
+    def _handle_ros_spreadsheet_success(
+        self, spreadsheet: Mapping[str, Any], spreadsheet_id: str
+    ) -> None:
+        self._ros_loading = False
+        if spreadsheet_id != self._ros_spreadsheet_id:
+            return
+
+        sheets = []
+        for sheet in spreadsheet.get("sheets", []):
+            properties = sheet.get("properties", {}) if isinstance(sheet, Mapping) else {}
+            title = str(properties.get("title", "")).strip()
+            index = properties.get("index", 0)
+            if title:
+                sheets.append((index, title, sheet))
+
+        sheets.sort(key=lambda item: item[0])
+        titles = tuple(title for _index, title, _sheet in sheets)
+        self._ros_sheet_map = {title: sheet for _index, title, sheet in sheets}
+        self._ros_loaded_spreadsheet_id = spreadsheet_id
+        self._update_ros_sheet_selector(titles)
+
+        if titles:
+            current = self._ros_sheet_var.get()
+            if current not in self._ros_sheet_map:
+                self._ros_sheet_var.set(titles[0])
+            self._update_ros_blocks()
+            count = len(titles)
+            self.set_status(
+                f"Loaded {count} ROS tab{'s' if count != 1 else ''}. Select a tab to view block markers.",
+                log=False,
+            )
+        else:
+            self.set_status("No tabs were found in the ROS spreadsheet.")
+
+    def _update_ros_sheet_selector(self, titles: Sequence[str]) -> None:
+        values = tuple(titles)
+        self._ros_sheet_values = values
+        if not self.ros_sheet_selector:
+            return
+
+        if values:
+            self.ros_sheet_selector.configure(values=values, state="readonly")
+            current = self._ros_sheet_var.get()
+            if current not in values:
+                self._ros_sheet_var.set(values[0])
+        else:
+            self.ros_sheet_selector.configure(values=(), state="disabled")
+            self._ros_sheet_var.set("")
+
+    def _update_ros_block_selector(self, blocks: Sequence[int]) -> None:
+        self._ros_available_blocks = list(blocks)
+        if not self.ros_block_selector:
+            return
+
+        if blocks:
+            values = tuple(str(number) for number in blocks)
+            self.ros_block_selector.configure(values=values, state="readonly")
+            current = self._ros_block_selection_var.get()
+            if current not in values:
+                self._ros_block_selection_var.set(values[0])
+        else:
+            self.ros_block_selector.configure(values=(), state="disabled")
+            self._ros_block_selection_var.set("")
+
+    def _on_ros_sheet_selected(self, _event: Any) -> None:
+        self._update_ros_blocks()
+
+    def _update_ros_blocks(self) -> None:
+        sheet_title = self._ros_sheet_var.get().strip()
+        if not sheet_title:
+            self._update_ros_block_selector([])
+            return
+
+        sheet = self._ros_sheet_map.get(sheet_title)
+        if not sheet:
+            self._update_ros_block_selector([])
+            return
+
+        sheet_data = sheet.get("data", []) if isinstance(sheet, Mapping) else []
+        if not sheet_data:
+            self._update_ros_block_selector([])
+            self.set_status(
+                f"{sheet_title}: Sheet data is empty; no ROS block markers found.",
+                log=False,
+            )
+            return
+
+        task_column = find_task_column(sheet_data)
+        if task_column is None:
+            self._update_ros_block_selector([])
+            self.set_status(
+                f"{sheet_title}: No TASK column found when scanning for ROS blocks.",
+                log=False,
+            )
+            return
+
+        starts: Dict[int, List[int]] = {}
+        ends: Dict[int, List[int]] = {}
+        for row_index, cell in _iter_column_cells(sheet_data, task_column):
+            text = _extract_cell_text(cell)
+            if not text:
+                continue
+            for match in BLOCK_START_PATTERN.finditer(text):
+                number = int(match.group(1))
+                starts.setdefault(number, []).append(row_index)
+            for match in BLOCK_END_PATTERN.finditer(text):
+                number = int(match.group(1))
+                ends.setdefault(number, []).append(row_index)
+
+        matching_numbers: List[int] = []
+        for number in sorted(starts.keys() & ends.keys()):
+            start_rows = starts[number]
+            end_rows = ends[number]
+            if any(start <= end for start in start_rows for end in end_rows):
+                matching_numbers.append(number)
+
+        self._update_ros_block_selector(matching_numbers)
+
+        if matching_numbers:
+            block_summary = ", ".join(str(number) for number in matching_numbers)
+            self.console.log(
+                f"[Fill Script] {sheet_title}: Found ROS block markers: {block_summary}"
+            )
+            count = len(matching_numbers)
+            self.set_status(
+                f"{sheet_title}: Found {count} ROS block{'s' if count != 1 else ''} with matching start and end tags.",
+                log=False,
+            )
+        else:
+            self.set_status(
+                f"{sheet_title}: No matching ROS block tags were found in the TASK column.",
+                log=False,
+            )
 
 
 class OptimizeTeamVideosUI:
