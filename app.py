@@ -2541,6 +2541,7 @@ class FillScriptUI:
         self._ros_loaded_spreadsheet_id: Optional[str] = None
         self._ros_sheet_map: Dict[str, Mapping[str, Any]] = {}
         self._ros_loading = False
+        self._ros_spreadsheet: Optional[Mapping[str, Any]] = None
 
         self.ros_document_loader.add_listener(self._on_ros_document_url_changed)
         self.credentials_manager.add_credentials_listener(self._on_credentials_changed)
@@ -2609,13 +2610,20 @@ class FillScriptUI:
             row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(0, 8)
         )
 
+        generate_button = ttk.Button(
+            self.parent,
+            text="Generate Text for Block",
+            command=self.generate_block_text,
+        )
+        generate_button.grid(row=row + 5, column=1, sticky="e", pady=(0, 8))
+
         status_label = ttk.Label(
             self.parent,
             textvariable=self._status_var,
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 5, column=0, columnspan=2, sticky="w")
+        status_label.grid(row=row + 6, column=0, columnspan=2, sticky="w")
 
         self.set_status(self._default_status, log=False)
 
@@ -2718,6 +2726,7 @@ class FillScriptUI:
             self._ros_spreadsheet_id = spreadsheet_id
             self._ros_loaded_spreadsheet_id = None
             self._ros_sheet_map = {}
+            self._ros_spreadsheet = None
             self._update_ros_sheet_selector(())
             self._update_ros_block_selector([])
         if spreadsheet_id:
@@ -2754,6 +2763,7 @@ class FillScriptUI:
             return
 
         self._ros_loading = True
+        self._ros_spreadsheet = None
         self.set_status("Loading ROS tabs...")
 
         def _worker() -> None:
@@ -2784,6 +2794,7 @@ class FillScriptUI:
         self._ros_loading = False
         if spreadsheet_id != self._ros_spreadsheet_id:
             return
+        self._ros_spreadsheet = None
         self.set_status(message)
 
     def _handle_ros_spreadsheet_success(
@@ -2793,6 +2804,7 @@ class FillScriptUI:
         if spreadsheet_id != self._ros_spreadsheet_id:
             return
 
+        self._ros_spreadsheet = spreadsheet
         sheets = []
         for sheet in spreadsheet.get("sheets", []):
             properties = sheet.get("properties", {}) if isinstance(sheet, Mapping) else {}
@@ -2919,6 +2931,106 @@ class FillScriptUI:
                 f"{sheet_title}: No matching ROS block tags were found in the TASK column.",
                 log=False,
             )
+
+    def generate_block_text(self) -> None:
+        if self._ros_loading:
+            self.set_status("Wait for the ROS spreadsheet to finish loading before generating text.")
+            return
+
+        doc_block_value = self._block_selection_var.get().strip()
+        if not doc_block_value:
+            self.set_status("Select a Google Doc block before generating text.")
+            return
+
+        try:
+            doc_block_number = int(doc_block_value)
+        except ValueError:
+            self.set_status("Select a valid Google Doc block before generating text.")
+            return
+
+        sheet_title = self._ros_sheet_var.get().strip()
+        if not sheet_title:
+            self.set_status("Select a ROS tab before generating text.")
+            return
+
+        ros_block_value = self._ros_block_selection_var.get().strip()
+        if not ros_block_value:
+            self.set_status("Select a ROS block before generating text.")
+            return
+
+        try:
+            ros_block_number = int(ros_block_value)
+        except ValueError:
+            self.set_status("Select a valid ROS block before generating text.")
+            return
+
+        if ros_block_number != doc_block_number:
+            self.set_status(
+                "Select matching block numbers in the Google Doc and ROS dropdowns before generating text."
+            )
+            return
+
+        if doc_block_number not in self._available_blocks:
+            self.set_status(
+                f"Block {doc_block_number} is not available in the scanned Google Doc."
+            )
+            return
+
+        if ros_block_number not in self._ros_available_blocks:
+            self.set_status(
+                f"Block {ros_block_number} is not available in ROS tab '{sheet_title}'."
+            )
+            return
+
+        spreadsheet = self._ros_spreadsheet
+        if spreadsheet is None:
+            self.set_status("Load the ROS spreadsheet before generating text.")
+            return
+
+        script_lines, diagnostics = build_script_lines_for_block(
+            spreadsheet, sheet_title, doc_block_number
+        )
+
+        if diagnostics:
+            for message in diagnostics:
+                self.console.log(f"[Fill Script] {message}")
+
+        if not script_lines:
+            self.set_status(
+                f"No eligible rows were found for block {doc_block_number} on '{sheet_title}'."
+            )
+            return
+
+        formatted_lines = [self._format_script_line(line) for line in script_lines]
+        indented_output = "\n".join(
+            f"  {line}" if line else "" for line in formatted_lines
+        )
+        log_message = (
+            f"[Fill Script] Block {doc_block_number} text ({sheet_title}):"
+        )
+        if indented_output:
+            log_message = f"{log_message}\n{indented_output}"
+        self.console.log(log_message)
+
+        self.set_status(
+            f"Generated script text for block {doc_block_number}. See the console for output.",
+            log=False,
+        )
+
+    @staticmethod
+    def _format_script_line(line: ScriptLine) -> str:
+        markers: List[str] = []
+        alignment = line.alignment.strip().lower()
+        if alignment and alignment != "left":
+            markers.append(alignment.upper())
+        if line.bold:
+            markers.append("BOLD")
+
+        prefix = f"[{', '.join(markers)}] " if markers else ""
+        text = line.text
+        if not text and prefix:
+            return prefix.rstrip()
+        return f"{prefix}{text}" if text else ""
 
 
 class OptimizeTeamVideosUI:
