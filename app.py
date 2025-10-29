@@ -5198,20 +5198,20 @@ def build_script_lines_for_block(
 
         entry = team_lookup.get(video_number)
         if entry is not None:
-            script_lines.append(ScriptLine(text=f"<Team {entry.label} Video>"))
-            script_lines.append(ScriptLine(text=""))
             script_lines.append(ScriptLine(text=host_line_text, bold=True, alignment="center"))
             script_lines.append(ScriptLine(text=entry.script.strip(), alignment="center"))
+            script_lines.append(ScriptLine(text=""))
+            script_lines.append(ScriptLine(text=f"<Team {entry.label} Video>"))
             script_lines.append(ScriptLine(text=""))
             eligible_found = True
             continue
 
         entry = feature_lookup.get(video_number)
         if entry is not None:
-            script_lines.append(ScriptLine(text=f"<Feature Video {entry.label}>"))
-            script_lines.append(ScriptLine(text=""))
             script_lines.append(ScriptLine(text=host_line_text, bold=True, alignment="center"))
             script_lines.append(ScriptLine(text=entry.script.strip(), alignment="center"))
+            script_lines.append(ScriptLine(text=""))
+            script_lines.append(ScriptLine(text=f"<Feature Video {entry.label}>"))
             script_lines.append(ScriptLine(text=""))
             eligible_found = True
             continue
