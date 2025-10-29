@@ -2542,6 +2542,8 @@ class FillScriptUI:
         self._ros_sheet_map: Dict[str, Mapping[str, Any]] = {}
         self._ros_loading = False
         self._ros_spreadsheet: Optional[Mapping[str, Any]] = None
+        self._document_id: Optional[str] = None
+        self._pending_document_id: Optional[str] = None
 
         self.ros_document_loader.add_listener(self._on_ros_document_url_changed)
         self.credentials_manager.add_credentials_listener(self._on_credentials_changed)
@@ -2640,6 +2642,9 @@ class FillScriptUI:
             )
             return
 
+        self._pending_document_id = document_id
+        self._document_id = None
+
         credentials, error = self.credentials_manager.get_valid_credentials()
         if credentials is None:
             if error:
@@ -2682,9 +2687,14 @@ class FillScriptUI:
         else:
             text = str(data)
 
-        self.parent.after(0, lambda: self._handle_document_text(text))
+        self.parent.after(0, lambda: self._handle_document_text(text, document_id))
 
-    def _handle_document_text(self, text: str) -> None:
+    def _handle_document_text(self, text: str, document_id: str) -> None:
+        if self._pending_document_id and document_id != self._pending_document_id:
+            return
+
+        self._document_id = document_id
+
         blocks = find_fill_script_blocks(text)
         self._available_blocks = blocks
 
@@ -3012,10 +3022,145 @@ class FillScriptUI:
             log_message = f"{log_message}\n{indented_output}"
         self.console.log(log_message)
 
-        self.set_status(
-            f"Generated script text for block {doc_block_number}. See the console for output.",
-            log=False,
+        self._apply_block_text_to_document(
+            doc_block_number, formatted_lines, sheet_title
         )
+
+    def _apply_block_text_to_document(
+        self, block_number: int, formatted_lines: Sequence[str], sheet_title: str
+    ) -> None:
+        document_id = self._document_id
+        if not document_id:
+            self.set_status(
+                "Read the Google Doc before generating text so it can be updated automatically. "
+                "The generated script text has been logged to the console.",
+            )
+            return
+
+        credentials, error = self.credentials_manager.get_valid_credentials()
+        if credentials is None:
+            message = (
+                error
+                if error
+                else "Load Google Drive credentials before updating the Google Doc."
+            )
+            self.set_status(
+                f"{message} The generated script text has been logged to the console."
+            )
+            return
+
+        if build is None:
+            self.set_status(
+                "google-api-python-client is not installed. Install it with 'pip install google-api-python-client'. "
+                "The generated script text has been logged to the console.",
+            )
+            return
+
+        block_text = "\n".join(formatted_lines).replace("\r\n", "\n")
+        if block_text and not block_text.endswith("\n"):
+            block_text += "\n"
+
+        status_message = (
+            f"Inserting generated script text for block {block_number} into the Google Doc..."
+        )
+        self.set_status(status_message, log=False)
+        self.console.log(
+            f"[Fill Script] Updating Google Doc block {block_number} with generated text from '{sheet_title}'."
+        )
+
+        def _worker() -> None:
+            try:
+                docs_service = build(
+                    "docs", "v1", credentials=credentials, cache_discovery=False
+                )
+                document = (
+                    docs_service.documents().get(documentId=document_id).execute()
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to load Google Doc for update: {exc}"[:500]
+
+                def _handle_failure() -> None:
+                    self.set_status(
+                        f"{message} The generated script text has been logged to the console."
+                    )
+
+                self.parent.after(0, _handle_failure)
+                return
+
+            block_range = _locate_document_block_content_range(document, block_number)
+            if block_range is None:
+
+                def _handle_missing_block() -> None:
+                    self.set_status(
+                        f"Block {block_number} markers were not found or are mismatched in the Google Doc. "
+                        "The generated script text has been logged to the console."
+                    )
+
+                self.parent.after(0, _handle_missing_block)
+                return
+
+            start_index, end_index = block_range
+            requests: List[Dict[str, Any]] = []
+            if end_index > start_index:
+                requests.append(
+                    {
+                        "deleteContentRange": {
+                            "range": {
+                                "startIndex": start_index,
+                                "endIndex": end_index,
+                            }
+                        }
+                    }
+                )
+            if block_text:
+                requests.append(
+                    {
+                        "insertText": {
+                            "location": {"index": start_index},
+                            "text": block_text,
+                        }
+                    }
+                )
+
+            if not requests:
+
+                def _handle_noop() -> None:
+                    self.set_status(
+                        f"Block {block_number} markers were found but no content needed to be inserted."
+                    )
+
+                self.parent.after(0, _handle_noop)
+                return
+
+            try:
+                docs_service.documents().batchUpdate(
+                    documentId=document_id, body={"requests": requests}
+                ).execute()
+            except Exception as exc:  # pragma: no cover - network interaction
+                message = f"Failed to update Google Doc: {exc}"[:500]
+
+                def _handle_update_failure() -> None:
+                    self.set_status(
+                        f"{message} The generated script text has been logged to the console."
+                    )
+
+                self.parent.after(0, _handle_update_failure)
+                return
+
+            success_message = (
+                f"Inserted generated script text for block {block_number} into the Google Doc. "
+                "The text is also logged in the console."
+            )
+
+            def _handle_success() -> None:
+                self.console.log(
+                    f"[Fill Script] Block {block_number} text inserted into the Google Doc from '{sheet_title}'."
+                )
+                self.set_status(success_message, log=False)
+
+            self.parent.after(0, _handle_success)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     @staticmethod
     def _format_script_line(line: ScriptLine) -> str:
@@ -3248,6 +3393,122 @@ def find_fill_script_blocks(text: str) -> List[int]:
             matching_numbers.append(number)
 
     return matching_numbers
+
+
+def _iter_document_text_runs(
+    elements: Sequence[Mapping[str, Any]]
+) -> Iterable[Tuple[int, str]]:
+    """Yield ``(start_index, text)`` pairs for text runs in a Docs response."""
+
+    for element in elements:
+        if not isinstance(element, Mapping):
+            continue
+
+        paragraph = element.get("paragraph")
+        if isinstance(paragraph, Mapping):
+            for run in paragraph.get("elements", []):
+                if not isinstance(run, Mapping):
+                    continue
+                text_run = run.get("textRun")
+                if not isinstance(text_run, Mapping):
+                    continue
+                text = text_run.get("content")
+                if not isinstance(text, str) or not text:
+                    continue
+                start_index = run.get("startIndex")
+                if not isinstance(start_index, int):
+                    start_index = element.get("startIndex")
+                if not isinstance(start_index, int):
+                    continue
+                yield start_index, text
+
+        table = element.get("table")
+        if isinstance(table, Mapping):
+            for row in table.get("tableRows", []):
+                if not isinstance(row, Mapping):
+                    continue
+                for cell in row.get("tableCells", []):
+                    if not isinstance(cell, Mapping):
+                        continue
+                    cell_content = cell.get("content", [])
+                    if isinstance(cell_content, list):
+                        yield from _iter_document_text_runs(cell_content)
+
+        table_of_contents = element.get("tableOfContents")
+        if isinstance(table_of_contents, Mapping):
+            toc_content = table_of_contents.get("content", [])
+            if isinstance(toc_content, list):
+                yield from _iter_document_text_runs(toc_content)
+
+
+def _extract_document_text_and_index_map(
+    document: Mapping[str, Any]
+) -> Tuple[str, List[int]]:
+    """Return document text and a map of character positions to Docs indexes."""
+
+    body = document.get("body")
+    if not isinstance(body, Mapping):
+        return "", []
+
+    content = body.get("content", [])
+    if not isinstance(content, list):
+        return "", []
+
+    text_parts: List[str] = []
+    index_map: List[int] = []
+
+    for start_index, text in _iter_document_text_runs(content):
+        text_parts.append(text)
+        for offset, _character in enumerate(text):
+            index_map.append(start_index + offset)
+
+    return "".join(text_parts), index_map
+
+
+def _char_index_to_doc_position(position: int, index_map: Sequence[int]) -> int:
+    """Convert a character offset within text to a Google Docs index."""
+
+    if not index_map:
+        return 1
+    if position <= 0:
+        return index_map[0]
+    if position >= len(index_map):
+        return index_map[-1] + 1
+    return index_map[position]
+
+
+def _locate_document_block_content_range(
+    document: Mapping[str, Any], block_number: int
+) -> Optional[Tuple[int, int]]:
+    """Return the Docs range that sits between the block markers."""
+
+    text, index_map = _extract_document_text_and_index_map(document)
+    if not text:
+        return None
+
+    start_pattern = re.compile(rf"\[Block\s+{block_number}\s+start\]", re.IGNORECASE)
+    end_pattern = re.compile(rf"\[Block\s+{block_number}\s+end\]", re.IGNORECASE)
+
+    start_match = start_pattern.search(text)
+    if not start_match:
+        return None
+
+    end_match = end_pattern.search(text, start_match.end())
+    if not end_match:
+        return None
+
+    content_start_pos = start_match.end()
+    while content_start_pos < len(text) and text[content_start_pos] in ("\n", "\r"):
+        content_start_pos += 1
+
+    content_end_pos = end_match.start()
+    if content_end_pos < content_start_pos:
+        content_end_pos = content_start_pos
+
+    start_index = _char_index_to_doc_position(content_start_pos, index_map)
+    end_index = _char_index_to_doc_position(content_end_pos, index_map)
+
+    return start_index, end_index
 
 
 def extract_spreadsheet_id(url: str) -> str:
