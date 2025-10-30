@@ -520,6 +520,75 @@ for line in COUNTRY_CODE_DATA.strip().splitlines():
             COUNTRY_NAME_TO_CODE[normalized] = iso3
 
 
+TEAM_KEY_COUNTRY_MAP: Dict[int, str] = {}
+_TEAM_COUNTRY_SOURCE_PATH: Optional[str] = None
+
+
+def _normalize_team_key(value: Any) -> Optional[int]:
+    """Return the integer team key represented by *value*, if possible."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if re.fullmatch(r"[-+]?\d+", stripped):
+            try:
+                return int(stripped)
+            except ValueError:
+                return None
+    return None
+
+
+def set_team_country_mapping(
+    mapping: Mapping[int, str], *, source_path: Optional[str] = None
+) -> None:
+    """Update the global team-key-to-country mapping."""
+
+    global TEAM_KEY_COUNTRY_MAP, _TEAM_COUNTRY_SOURCE_PATH
+
+    TEAM_KEY_COUNTRY_MAP.clear()
+    for key, code in mapping.items():
+        normalized_key = _normalize_team_key(key)
+        if normalized_key is None:
+            continue
+        normalized_code = normalize_country_code(str(code))
+        if normalized_code:
+            TEAM_KEY_COUNTRY_MAP[normalized_key] = normalized_code
+
+    _TEAM_COUNTRY_SOURCE_PATH = str(source_path) if source_path else None
+
+
+def get_team_country_mapping() -> Dict[int, str]:
+    """Return a copy of the current team-key mapping."""
+
+    return dict(TEAM_KEY_COUNTRY_MAP)
+
+
+def resolve_team_key_country(value: Any) -> Optional[str]:
+    """Return the ISO alpha-3 code for *value* if it maps to a team key."""
+
+    normalized_key = _normalize_team_key(value)
+    if normalized_key is None:
+        return None
+    return TEAM_KEY_COUNTRY_MAP.get(normalized_key)
+
+
+def get_team_country_source_path() -> Optional[str]:
+    """Return the original path for the loaded team mapping, if available."""
+
+    return _TEAM_COUNTRY_SOURCE_PATH
+
+
 def normalize_country_code(code: str) -> Optional[str]:
     """Return the ISO-3166 alpha-3 code for *code* if it can be resolved."""
 
@@ -1885,6 +1954,9 @@ class ROSDocumentLoaderUI:
     """Allow the user to select and persist the ROS spreadsheet URL."""
 
     STORAGE_PATH = Path.home() / ".fgc_team_filler" / "ros_document_url.txt"
+    TEAM_MAPPING_STORAGE_PATH = (
+        Path.home() / ".fgc_team_filler" / "team_country_mapping.json"
+    )
 
     def __init__(
         self,
@@ -1898,11 +1970,16 @@ class ROSDocumentLoaderUI:
         self._credentials_manager = credentials_manager
         self.sheet_url_var = tk.StringVar(value=self._load_saved_url())
         self.document_name_var = tk.StringVar()
+        self.team_mapping_path_var = tk.StringVar()
         self._status_var = tk.StringVar()
         self._listeners: List[Callable[[str], None]] = []
         self._name_listeners: List[Callable[[str], None]] = []
         self._resolved_names: Dict[str, str] = {}
         self._lookup_in_progress: Set[str] = set()
+        self._team_country_map: Dict[int, str] = {}
+        self._initial_mapping_message: Optional[str] = None
+
+        self._load_saved_team_country_map()
 
         self.sheet_url_var.trace_add("write", self._on_url_var_changed)
         self._update_document_name(self.sheet_url_var.get())
@@ -1936,7 +2013,31 @@ class ROSDocumentLoaderUI:
             text="Save Document URL",
             command=self.save_document_url,
         )
-        save_button.grid(row=row + 2, column=1, sticky="e", pady=8)
+        save_button.grid(row=row + 2, column=1, sticky="e", pady=(8, 0))
+
+        ttk.Label(self.parent, text="Team-country mapping:").grid(
+            row=row + 3, column=0, sticky="w", pady=(8, 0)
+        )
+
+        mapping_display = ttk.Entry(
+            self.parent,
+            textvariable=self.team_mapping_path_var,
+            state="readonly",
+        )
+        mapping_display.grid(
+            row=row + 3,
+            column=1,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        mapping_button = ttk.Button(
+            self.parent,
+            text="Import Team Country Mapping",
+            command=self.import_team_country_mapping,
+        )
+        mapping_button.grid(row=row + 4, column=1, sticky="e", pady=8)
 
         status_label = ttk.Label(
             self.parent,
@@ -1944,13 +2045,23 @@ class ROSDocumentLoaderUI:
             wraplength=520,
             justify="left",
         )
-        status_label.grid(row=row + 3, column=0, columnspan=2, sticky="w")
+        status_label.grid(row=row + 5, column=0, columnspan=2, sticky="w")
 
         initial_url = self.sheet_url_var.get().strip()
         if initial_url:
             self._set_status("Loaded saved ROS document URL.", log=False)
         else:
             self._set_status("Enter a Google Sheets link to use with ROS tools.", log=False)
+
+        if self._initial_mapping_message:
+            existing = self._status_var.get().strip()
+            combined = (
+                f"{existing}\n{self._initial_mapping_message}"
+                if existing
+                else self._initial_mapping_message
+            )
+            self._status_var.set(combined)
+            self._initial_mapping_message = None
 
     def add_listener(self, callback: Callable[[str], None]) -> None:
         self._listeners.append(callback)
@@ -1963,6 +2074,9 @@ class ROSDocumentLoaderUI:
 
     def get_document_name(self) -> str:
         return self.document_name_var.get().strip()
+
+    def get_team_country_map(self) -> Dict[int, str]:
+        return dict(self._team_country_map)
 
     def save_document_url(self) -> None:
         url = self.sheet_url_var.get().strip()
@@ -1991,6 +2105,53 @@ class ROSDocumentLoaderUI:
             except Exception:
                 continue
 
+    def import_team_country_mapping(self) -> None:
+        filename = filedialog.askopenfilename(
+            parent=self.parent,
+            title="Select team-country mapping JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*")],
+        )
+        if not filename:
+            return
+
+        try:
+            with open(filename, "r", encoding="utf-8") as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            self._set_status("Selected file could not be found.")
+            return
+        except json.JSONDecodeError as exc:
+            self._set_status(f"Failed to parse JSON: {exc}")
+            return
+        except OSError as exc:
+            self._set_status(f"Unable to read file: {exc}")
+            return
+
+        mapping, missing_keys = self._parse_team_country_mapping(data)
+        if not mapping:
+            self._set_status(
+                "No team entries with recognizable country codes were found in the selected file."
+            )
+            return
+
+        self._team_country_map = mapping
+        self.team_mapping_path_var.set(filename)
+        set_team_country_mapping(mapping, source_path=filename)
+        self._persist_team_country_map(mapping, source_path=filename)
+
+        missing_count = len(missing_keys)
+        if missing_count:
+            skipped_message = (
+                " Skipped 1 entry without a country code."
+                if missing_count == 1
+                else f" Skipped {missing_count} entries without country codes."
+            )
+        else:
+            skipped_message = ""
+        self._set_status(
+            f"Loaded team-country mapping with {len(mapping)} entries.{skipped_message}"
+        )
+
     def _load_saved_url(self) -> str:
         storage_path = self.STORAGE_PATH
         if not storage_path.exists():
@@ -2007,6 +2168,139 @@ class ROSDocumentLoaderUI:
 
     def _on_url_var_changed(self, *_: Any) -> None:
         self._update_document_name(self.sheet_url_var.get())
+
+    def _parse_team_country_mapping(
+        self, payload: Any
+    ) -> Tuple[Dict[int, str], List[int]]:
+        mapping: Dict[int, str] = {}
+        missing_keys: List[int] = []
+
+        entries: Iterable[Any]
+        if isinstance(payload, list):
+            entries = payload
+        elif isinstance(payload, Mapping):
+            entries_list: Optional[Iterable[Any]] = None
+            for key in ("teams", "participants", "entries", "data", "items"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    entries_list = candidate
+                    break
+            if entries_list is None:
+                entries = [payload]
+            else:
+                entries = entries_list
+        else:
+            return mapping, missing_keys
+
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            team_key_value = None
+            for label in ("teamKey", "team_key", "teamId", "team_id"):
+                if label in entry:
+                    team_key_value = entry[label]
+                    break
+            team_key = _normalize_team_key(team_key_value)
+            if team_key is None:
+                continue
+
+            normalized_code: Optional[str] = None
+            for code_label in (
+                "country",
+                "countryCode",
+                "country_code",
+                "countrycode",
+            ):
+                if code_label not in entry:
+                    continue
+                value = entry[code_label]
+                if not isinstance(value, str):
+                    continue
+                stripped = value.strip()
+                if not stripped:
+                    continue
+                code = normalize_country_code(stripped)
+                if code:
+                    normalized_code = code
+                    break
+            if normalized_code is None:
+                missing_keys.append(team_key)
+                continue
+
+            mapping[team_key] = normalized_code
+
+        return mapping, missing_keys
+
+    def _persist_team_country_map(
+        self, mapping: Mapping[int, str], *, source_path: Optional[str]
+    ) -> None:
+        storage_path = self.TEAM_MAPPING_STORAGE_PATH
+        payload = {
+            "mapping": {str(key): code for key, code in sorted(mapping.items())},
+        }
+        if source_path:
+            payload["source"] = source_path
+
+        try:
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(storage_path, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, indent=2, sort_keys=True)
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            self.console.log(
+                f"[ROS Document] Failed to save team-country mapping: {exc}"[:500]
+            )
+
+    def _load_saved_team_country_map(self) -> None:
+        storage_path = self.TEAM_MAPPING_STORAGE_PATH
+        if not storage_path.exists():
+            self._team_country_map = {}
+            set_team_country_mapping({}, source_path=None)
+            return
+
+        try:
+            with open(storage_path, "r", encoding="utf-8") as stream:
+                payload = json.load(stream)
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            self.console.log(
+                f"[ROS Document] Failed to load saved team-country mapping: {exc}"[:500]
+            )
+            self._team_country_map = {}
+            set_team_country_mapping({}, source_path=None)
+            return
+
+        mapping: Dict[int, str] = {}
+        source_path: Optional[str] = None
+        if isinstance(payload, Mapping):
+            raw_mapping = payload.get("mapping")
+            if isinstance(raw_mapping, Mapping):
+                for key, value in raw_mapping.items():
+                    team_key = _normalize_team_key(key)
+                    if team_key is None or not isinstance(value, str):
+                        continue
+                    code = normalize_country_code(value.strip())
+                    if code:
+                        mapping[team_key] = code
+            else:
+                parsed_mapping, _missing = self._parse_team_country_mapping(payload)
+                mapping.update(parsed_mapping)
+            source_candidate = payload.get("source")
+            if isinstance(source_candidate, str) and source_candidate.strip():
+                source_path = source_candidate.strip()
+        elif isinstance(payload, list):
+            parsed_mapping, _missing = self._parse_team_country_mapping(payload)
+            mapping.update(parsed_mapping)
+
+        self._team_country_map = mapping
+        if mapping:
+            display_source = source_path or str(storage_path)
+            self.team_mapping_path_var.set(display_source)
+            set_team_country_mapping(mapping, source_path=display_source)
+            self._initial_mapping_message = (
+                f"Loaded saved team-country mapping from {display_source} "
+                f"({len(mapping)} entries)."
+            )
+        else:
+            set_team_country_mapping({}, source_path=None)
 
     def set_document_name(self, name: str) -> None:
         text = (name or "").strip()
@@ -4214,21 +4508,64 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> Tuple[List[str], 
     codes_seen: Set[str] = set()
     codes_ordered: List[str] = []
 
+    def record_raw_value(text: str) -> None:
+        stripped = text.strip()
+        if stripped and stripped not in raw_seen:
+            raw_seen.add(stripped)
+            raw_values.append(stripped)
+
+    def record_country_code(candidate: str, *, raw_value: Optional[str] = None) -> None:
+        if raw_value is not None:
+            record_raw_value(raw_value)
+        else:
+            record_raw_value(str(candidate))
+        iso3_candidate = normalize_country_code(candidate)
+        if iso3_candidate and iso3_candidate not in codes_seen:
+            codes_seen.add(iso3_candidate)
+            codes_ordered.append(iso3_candidate)
+
+    def record_team_key(value: Any) -> None:
+        team_key = _normalize_team_key(value)
+        if team_key is None:
+            return
+        display = f"teamKey {team_key}"
+        country_code = resolve_team_key_country(team_key)
+        if country_code:
+            record_country_code(country_code, raw_value=display)
+        else:
+            record_raw_value(display)
+
     def visit(value: Any, depth: int = 0) -> None:
         if depth > 6:
             return
         if isinstance(value, str):
-            iso3_candidate = normalize_country_code(value)
+            stripped = value.strip()
+            if not stripped:
+                return
+            iso3_candidate = normalize_country_code(stripped)
             if iso3_candidate:
-                stripped = value.strip()
-                if stripped and stripped not in raw_seen:
-                    raw_seen.add(stripped)
-                    raw_values.append(stripped)
-                if iso3_candidate not in codes_seen:
-                    codes_seen.add(iso3_candidate)
-                    codes_ordered.append(iso3_candidate)
+                record_country_code(stripped)
+                return
+            team_key_candidate = _normalize_team_key(stripped)
+            if team_key_candidate is not None:
+                record_team_key(team_key_candidate)
+            else:
+                record_raw_value(stripped)
             return
         if isinstance(value, Mapping):
+            team_key_value = None
+            for team_key_label in (
+                "teamKey",
+                "team_key",
+                "teamId",
+                "team_id",
+            ):
+                if team_key_label in value:
+                    team_key_value = value[team_key_label]
+                    break
+            if team_key_value is not None:
+                record_team_key(team_key_value)
+
             for key in (
                 "country",
                 "countryCode",
@@ -4245,6 +4582,9 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> Tuple[List[str], 
         if isinstance(value, (list, tuple, set)):
             for item in value:
                 visit(item, depth + 1)
+            return
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            record_team_key(value)
 
     for key in (
         "countries",
@@ -4254,6 +4594,7 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> Tuple[List[str], 
         "alliances",
         "blueAllianceTeams",
         "redAllianceTeams",
+        "teamKeys",
     ):
         if key in match:
             visit(match[key])
@@ -4264,6 +4605,8 @@ def _extract_countries_from_match(match: Mapping[str, Any]) -> Tuple[List[str], 
                 visit(value)
             elif isinstance(value, Mapping):
                 visit(value)
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                record_team_key(value)
     return raw_values, codes_ordered
 
 
@@ -4273,6 +4616,7 @@ def build_match_country_map(
 ) -> Tuple[Dict[int, List[str]], List[str]]:
     mapping: Dict[int, List[str]] = {}
     diagnostics: List[str] = []
+    team_mapping_warning_emitted = False
 
     for match in matches:
         if not isinstance(match, Mapping):
@@ -4312,6 +4656,16 @@ def build_match_country_map(
                 f"{prefix} Match #{match_number}: display country names -> {display_formatted}"
             )
         if not countries:
+            if (
+                not TEAM_KEY_COUNTRY_MAP
+                and not team_mapping_warning_emitted
+                and any("teamKey" in value for value in raw_values)
+            ):
+                diagnostics.append(
+                    "Match schedule entries reference team keys, but no team-country mapping has been imported. "
+                    "Use the 'Import Team Country Mapping' button under Load ROS Document to load the mapping JSON."
+                )
+                team_mapping_warning_emitted = True
             details = importer.describe_match(dict(match))
             diagnostics.append(
                 f"No country entries found for match #{match_number}. Details: {details}."
