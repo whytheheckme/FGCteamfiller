@@ -1203,9 +1203,9 @@ class MatchScheduleImporterUI:
             self._set_status(f"Unable to read file: {exc}")
             return
 
-        matches = data.get("matches") if isinstance(data, dict) else None
-        if not isinstance(matches, list):
-            self._set_status("JSON file does not contain a 'matches' list.")
+        matches = self._extract_matches(data)
+        if matches is None:
+            self._set_status("JSON file does not contain a recognizable matches list.")
             return
 
         self._matches = matches
@@ -1238,12 +1238,67 @@ class MatchScheduleImporterUI:
             return None
         return field_number
 
+    def _extract_matches(self, payload: Any) -> Optional[List[Dict[str, Any]]]:
+        """Return a list of matches from *payload* or ``None`` if not found."""
+
+        def _looks_like_match_entry(entry: Any) -> bool:
+            if not isinstance(entry, Mapping):
+                return False
+            hint_keys = {
+                "participants",
+                "scheduledTime",
+                "matchNumber",
+                "matchKey",
+                "match",
+                "name",
+                "description",
+                "field",
+                "fieldNumber",
+                "id",
+            }
+            return len(hint_keys.intersection(entry.keys())) >= 2
+
+        seen: Set[int] = set()
+
+        def _search(node: Any) -> Optional[List[Dict[str, Any]]]:
+            node_id = id(node)
+            if node_id in seen:
+                return None
+            seen.add(node_id)
+
+            if isinstance(node, list):
+                dict_entries = [item for item in node if isinstance(item, dict)]
+                if dict_entries and all(_looks_like_match_entry(item) for item in dict_entries):
+                    return dict_entries
+                for item in node:
+                    result = _search(item)
+                    if result is not None:
+                        return result
+            elif isinstance(node, Mapping):
+                matches_value = node.get("matches")
+                if isinstance(matches_value, list):
+                    result = _search(matches_value)
+                    if result is not None:
+                        return result
+                for value in node.values():
+                    result = _search(value)
+                    if result is not None:
+                        return result
+            return None
+
+        matches = _search(payload)
+        if matches is None:
+            return None
+        return [match for match in matches if isinstance(match, dict)]
+
     def _count_field_matches(
         self, matches: Sequence[Dict[str, Any]], field_number: int
     ) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for match in matches:
-            field = match.get("field")
+            if not isinstance(match, dict):
+                continue
+            field = self._get_match_field_number(match)
             if field != field_number:
                 continue
             scheduled_time = match.get("scheduledTime")
@@ -1260,7 +1315,9 @@ class MatchScheduleImporterUI:
     ) -> Dict[str, List[Dict[str, Any]]]:
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for match in matches:
-            if match.get("field") != field_number:
+            if not isinstance(match, dict):
+                continue
+            if self._get_match_field_number(match) != field_number:
                 continue
             scheduled_time = match.get("scheduledTime")
             if not isinstance(scheduled_time, str):
@@ -1365,7 +1422,7 @@ class MatchScheduleImporterUI:
         for match in self._matches:
             if not isinstance(match, dict):
                 continue
-            if match.get("field") != field_number:
+            if self._get_match_field_number(match) != field_number:
                 continue
             selected.append(dict(match))
         return selected
@@ -1418,10 +1475,14 @@ class MatchScheduleImporterUI:
         if scheduled:
             details.append(f"scheduledTime={scheduled}")
 
-        field_value = match.get("field")
-        field_formatted = _format_value(field_value)
-        if field_formatted:
-            details.append(f"field={field_formatted}")
+        field_number = self._get_match_field_number(match)
+        if field_number is not None:
+            details.append(f"fieldNumber={field_number}")
+        else:
+            field_value = match.get("field")
+            field_formatted = _format_value(field_value)
+            if field_formatted:
+                details.append(f"field={field_formatted}")
 
         if details:
             return ", ".join(details)
@@ -1430,6 +1491,43 @@ class MatchScheduleImporterUI:
         if keys:
             return f"available keys: {keys}"
         return "no additional details available"
+
+    def _get_match_field_number(self, match: Mapping[str, Any]) -> Optional[int]:
+        """Extract the field number from a match entry, if present."""
+
+        for key in ("fieldNumber", "field_number"):
+            number = self._coerce_field_number(match.get(key))
+            if number is not None:
+                return number
+
+        field_value = match.get("field")
+        number = self._coerce_field_number(field_value)
+        if number is not None:
+            return number
+
+        if isinstance(field_value, Mapping):
+            for nested_key in ("fieldNumber", "field_number", "number", "id"):
+                number = self._coerce_field_number(field_value.get(nested_key))
+                if number is not None:
+                    return number
+
+        return None
+
+    def _coerce_field_number(self, value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            digits = re.findall(r"\d+", stripped)
+            if digits:
+                return int(digits[-1])
+        return None
 
     def _coerce_match_number(self, value: Any) -> Optional[int]:
         if isinstance(value, bool):
